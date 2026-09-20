@@ -43,6 +43,7 @@ steps:
           platform: linux/arm64
           workdir: /workdir
     commands:
+      - rustup component add rustfmt clippy
       - cargo fmt --check
       - cargo clippy --all-targets -- -D warnings
       - cargo build --locked

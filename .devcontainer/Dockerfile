@@ -5,6 +5,14 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
     && echo "deb [signed-by=/usr/share/keyrings/doppler-archive-keyring.gpg] https://packages.doppler.com/public/cli/deb/debian any-version main" | tee /etc/apt/sources.list.d/doppler-cli.list \
     && apt-get update && apt-get install -y doppler
 
+# rustfmt and clippy are rustup *components*, not part of the toolchain the
+# official rust images ship: devcontainers/rust is `FROM rust:1-<variant>`, and
+# those images use the rustup **minimal** profile (rustc + cargo only). Without
+# this, the local lint gate (code-quality-rust) and any hand-run `cargo clippy`
+# or `cargo fmt` die with "'cargo-fmt' is not installed for the toolchain".
+# A component add is idempotent, so re-running it on an image that already has
+# them is free.
+RUN rustup component add rustfmt clippy
 
 # Build a current tmux from source (Debian bookworm's apt tmux is old).
 # Bump TMUX_VERSION (and TMUX_SHA256) to keep tmux up to date.
