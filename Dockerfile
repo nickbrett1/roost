@@ -6,28 +6,14 @@
 # builds the application. Stage 2 (runtime): copies only the build output /
 # virtualenv and production dependencies, keeping the final image small.
 
-# Frontend stage: builds the Svelte app before the rust build below.
-# The rust image has no node, so this is a separate stage rather than a
-# step in the main one. Output lands in web/build/
-# (see web/README.md).
-FROM node:22-bookworm AS frontend
-WORKDIR /app
-COPY web/package.json web/package-lock.json* web/.npmrc* ./
-RUN PINNED_NPM="$(node -p "try{require('./package.json').packageManager}catch(e){''}" 2>/dev/null || true)" \
-    && if [ -n "$PINNED_NPM" ] && [ "$(npm --version)" != "${PINNED_NPM#npm@}" ]; then \
-         echo "Activating pinned ${PINNED_NPM}..."; \
-         npm install -g "${PINNED_NPM}" >/dev/null || true; \
-       fi \
-    && if [ -f package-lock.json ]; then npm ci; else npm install; fi
-COPY web/. .
-RUN npm run build
 
 FROM rust:1-slim AS build
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
-RUN cargo fetch
+RUN mkdir -p src && echo 'fn main() {}' > src/main.rs \
+    && cargo fetch \
+    && rm -rf src
 COPY src ./src
-COPY --from=frontend /app/build ./web/build
 RUN cargo build --release
 
 FROM rust:1-slim
@@ -36,11 +22,9 @@ WORKDIR /app
 # the package to nickbrett1/roost so it inherits the
 # repo's access (public repo -> public package; no manual visibility step).
 LABEL org.opencontainers.image.source=https://github.com/nickbrett1/roost
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=build /app/target/release/roost /usr/local/bin/roost
-COPY --from=frontend /app/build ./web/build
 EXPOSE 3000
 
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s CMD curl -fsS http://127.0.0.1:3000/healthz || exit 1
+
 CMD ["roost"]

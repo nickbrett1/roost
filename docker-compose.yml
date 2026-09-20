@@ -14,7 +14,7 @@ services:
     restart: unless-stopped
 
     ports:
-      - "127.0.0.1:3008:3000"
+      - "3000:3000"
 
     environment:
       # Set your environment variables here or in a NAS-side .env file
@@ -24,6 +24,4 @@ services:
       - "com.centurylinklabs.watchtower.enable=true"
       - "homepage.group=Services"
       - "homepage.name=roost"
-      - "homepage.href=http://nas:3008/"
-      - "homepage.widget.type=customapi"
-      - "homepage.widget.url=http://localhost:3008/healthz"
+      - "homepage.href=http://localhost:3000/"
