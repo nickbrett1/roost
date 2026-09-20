@@ -12,5 +12,8 @@
 
 - roost:
     icon: sh-docker
-    href: http://localhost:3000/
+    href: http://nas:3008/
     description: roost container
+    widget:
+      type: customapi
+      url: http://localhost:3008/healthz
