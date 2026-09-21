@@ -109,13 +109,30 @@ steps:
           echo "GHCR_UPDATE_TOKEN is missing from Doppler (common/prd) - cannot publish." >&2
           exit 1
         fi
-        echo "$$GHCR_TOKEN" | docker login ghcr.io -u "$$GHCR_USERNAME" --password-stdin
-      - |
+        # One shell on purpose: Buildkite runs each command in its own shell, so
+        # the credential above would be gone by the next one, and an exit 0 in a
+        # separate command would not stop the commands after it.
+        #
+        # The docker config is per JOB, never the shared ~/.docker keychain. Two
+        # builds of one commit log in at the same moment, and the loser used to
+        # die with "The specified item already exists in the keychain.
+        # (-25299)" before it ever reached buildx (see
+        # specs/015-genproj-docker-publish-idempotent).
+        export DOCKER_CONFIG="/tmp/bk-docker-$$BUILDKITE_JOB_ID"
+        mkdir -p "$$DOCKER_CONFIG"
         BUILDX_BUILDER_NAME="bk-$$BUILDKITE_PIPELINE_SLUG-$$BUILDKITE_JOB_ID"
-        trap 'docker buildx rm "$$BUILDX_BUILDER_NAME" >/dev/null 2>&1 || true' EXIT
+        trap 'rm -rf "$$DOCKER_CONFIG"; docker buildx rm "$$BUILDX_BUILDER_NAME" >/dev/null 2>&1 || true' EXIT
+        echo "$$GHCR_TOKEN" | docker login ghcr.io -u "$$GHCR_USERNAME" --password-stdin
+        # Skip if this commit is already published: the release step's ls-remote
+        # guard, for an image. Only a positive answer skips - if the registry
+        # cannot be reached the push still runs, because "could not ask" must
+        # never read as "already published".
+        if docker buildx imagetools inspect "$$IMAGE:$$BUILDKITE_COMMIT" >/dev/null 2>&1; then
+          echo "$$IMAGE:$$BUILDKITE_COMMIT is already in the registry - skipping the build."
+          exit 0
+        fi
         docker buildx create --bootstrap --name "$$BUILDX_BUILDER_NAME" >/dev/null
-      - >
-        docker buildx build --builder "$$BUILDX_BUILDER_NAME" --platform linux/amd64
-        --cache-from type=registry,ref=$$CACHE_REF
-        --cache-to type=registry,ref=$$CACHE_REF,mode=max
-        -t $$IMAGE:$$BUILDKITE_COMMIT -t $$IMAGE:latest --push .
+        docker buildx build --builder "$$BUILDX_BUILDER_NAME" --platform linux/amd64 \
+          --cache-from type=registry,ref=$$CACHE_REF \
+          --cache-to type=registry,ref=$$CACHE_REF,mode=max \
+          -t $$IMAGE:$$BUILDKITE_COMMIT -t $$IMAGE:latest --push .
