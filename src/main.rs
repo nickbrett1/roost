@@ -12,6 +12,16 @@ async fn main() -> anyhow::Result<()> {
     let port = config.port;
     let static_dir = config.static_dir.clone();
 
+    // §7.1: the per-agent credential is the boundary. When none is configured
+    // the tailnet is the only door, so say so out loud rather than leave an
+    // operator to assume `/agent/ws` is gated.
+    if !config.agent_auth_enabled() {
+        eprintln!(
+            "WARNING: no ROOST_AGENT_TOKENS configured; /agent/ws accepts any agent \
+             (authentication off)"
+        );
+    }
+
     let hub = Hub::new(config);
     let app = server::app(Arc::clone(&hub));
 

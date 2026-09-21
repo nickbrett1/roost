@@ -1,5 +1,6 @@
 //! Hub configuration, read from the environment with sane defaults.
 
+use std::collections::HashMap;
 use std::env;
 
 /// Default port the hub binds inside its container (the compose file publishes
@@ -21,6 +22,10 @@ pub struct Config {
     pub status_poll_ms: u64,
     /// How long a `request` waits for its `response` before giving up.
     pub request_timeout_ms: u64,
+    /// Per-agent credentials, keyed by `agentId`. Empty means authentication is
+    /// **off** (§7.1): the tailnet is then the only boundary, which is a choice
+    /// an operator makes by not configuring any.
+    pub agent_tokens: HashMap<String, String>,
 }
 
 impl Default for Config {
@@ -32,6 +37,7 @@ impl Default for Config {
             stuck_after_ms: 120_000,
             status_poll_ms: 15_000,
             request_timeout_ms: 10_000,
+            agent_tokens: HashMap::new(),
         }
     }
 }
@@ -60,8 +66,77 @@ impl Config {
         if let Some(ms) = read_u64("ROOST_REQUEST_TIMEOUT_MS") {
             config.request_timeout_ms = ms;
         }
+        if let Ok(tokens) = env::var("ROOST_AGENT_TOKENS") {
+            config.agent_tokens = parse_agent_tokens(&tokens);
+        }
         config
     }
+
+    /// Whether `/agent/ws` requires a credential (§7.1). Off exactly when no
+    /// tokens are configured.
+    pub fn agent_auth_enabled(&self) -> bool {
+        !self.agent_tokens.is_empty()
+    }
+
+    /// Whether `presented` authenticates `agent_id`.
+    ///
+    /// When authentication is off this is always `true` — an operator who
+    /// configured no tokens has chosen the tailnet as the only boundary. When it
+    /// is on, the agent must be in the map *and* the token must match: knowing
+    /// some valid token does not let an agent claim another's `agentId`.
+    ///
+    /// The comparison is constant-time so a wrong token cannot be discovered one
+    /// byte at a time. Token *length* is not hidden; length is not a secret worth
+    /// hiding for a random fleet credential.
+    pub fn agent_token_matches(&self, agent_id: &str, presented: Option<&str>) -> bool {
+        if !self.agent_auth_enabled() {
+            return true;
+        }
+        let Some(expected) = self.agent_tokens.get(agent_id) else {
+            return false;
+        };
+        let Some(presented) = presented else {
+            return false;
+        };
+        constant_time_eq(expected.as_bytes(), presented.as_bytes())
+    }
+}
+
+/// Parse `ROOST_AGENT_TOKENS`: `agentId=token` entries separated by commas or
+/// newlines, e.g. `mac-studio-goose=s3cret,nas-goose=other`.
+///
+/// An entry with no `=`, or with an empty `agentId` or token, is skipped: a
+/// malformed entry must not invent an agent that authenticates with an empty
+/// string. Whitespace around entries and around the `=` is ignored.
+fn parse_agent_tokens(raw: &str) -> HashMap<String, String> {
+    let mut tokens = HashMap::new();
+    for entry in raw.split(['\n', ',']) {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let Some((agent_id, token)) = entry.split_once('=') else {
+            continue;
+        };
+        let (agent_id, token) = (agent_id.trim(), token.trim());
+        if agent_id.is_empty() || token.is_empty() {
+            continue;
+        }
+        tokens.insert(agent_id.to_string(), token.to_string());
+    }
+    tokens
+}
+
+/// Compare two byte strings without an early return on the first difference.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut difference = 0u8;
+    for (left, right) in a.iter().zip(b.iter()) {
+        difference |= left ^ right;
+    }
+    difference == 0
 }
 
 fn read_u64(key: &str) -> Option<u64> {
@@ -78,5 +153,66 @@ mod tests {
         assert_eq!(config.port, 3000);
         assert_eq!(config.static_dir, "web/dist");
         assert_eq!(config.stuck_after_ms, 120_000);
+    }
+
+    #[test]
+    fn auth_is_off_until_a_token_is_configured() {
+        let config = Config::default();
+        assert!(!config.agent_auth_enabled());
+        // With auth off, every agent is let through — the tailnet is the door.
+        assert!(config.agent_token_matches("anything", None));
+        assert!(config.agent_token_matches("anything", Some("whatever")));
+    }
+
+    #[test]
+    fn a_configured_agent_needs_its_own_token() {
+        let config = Config {
+            agent_tokens: parse_agent_tokens("mac-studio-goose=s3cret,nas-goose=other"),
+            ..Config::default()
+        };
+        assert!(config.agent_auth_enabled());
+        assert!(config.agent_token_matches("mac-studio-goose", Some("s3cret")));
+        assert!(config.agent_token_matches("nas-goose", Some("other")));
+        // The wrong token, no token, and the wrong agent are all refused.
+        assert!(!config.agent_token_matches("mac-studio-goose", Some("wrong")));
+        assert!(!config.agent_token_matches("mac-studio-goose", None));
+        assert!(!config.agent_token_matches("unknown-host", Some("s3cret")));
+        // One agent's token does not authenticate another agent.
+        assert!(!config.agent_token_matches("nas-goose", Some("s3cret")));
+    }
+
+    #[test]
+    fn token_parsing_tolerates_whitespace_and_skips_junk() {
+        let tokens = parse_agent_tokens("  a = 1 \n b=2 ,, c = , =x, d=  ");
+        // `c` and `d` (empty tokens) and the empty-key entry are dropped.
+        assert_eq!(tokens.get("a").map(String::as_str), Some("1"));
+        assert_eq!(tokens.get("b").map(String::as_str), Some("2"));
+        assert!(!tokens.contains_key("c"));
+        assert!(!tokens.contains_key("d"));
+        assert!(!tokens.contains_key(""));
+        assert_eq!(tokens.len(), 2);
+    }
+
+    #[test]
+    fn an_empty_or_junk_setting_leaves_auth_off() {
+        assert!(parse_agent_tokens("").is_empty());
+        assert!(parse_agent_tokens("   \n  ").is_empty());
+        assert!(parse_agent_tokens("no-equals-sign").is_empty());
+        // A config whose only entry is malformed is a config with auth off, not
+        // one that authenticates everyone against an empty token.
+        let config = Config {
+            agent_tokens: parse_agent_tokens("=s3cret"),
+            ..Config::default()
+        };
+        assert!(!config.agent_auth_enabled());
+    }
+
+    #[test]
+    fn the_comparison_does_not_short_circuit_on_length() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+        assert!(!constant_time_eq(b"", b"a"));
+        assert!(constant_time_eq(b"", b""));
     }
 }

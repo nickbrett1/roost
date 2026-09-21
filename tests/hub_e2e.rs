@@ -371,3 +371,129 @@ async fn history_to_an_unreachable_agent_is_503() {
     let (status, _) = http_get(test.addr, "/api/agents/a2a-goose-dev/history/sessions").await;
     assert_eq!(status, 503);
 }
+
+/// A per-agent credential map, as `Config` would hold it.
+fn tokens(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+    pairs
+        .iter()
+        .map(|(agent, token)| (agent.to_string(), token.to_string()))
+        .collect()
+}
+
+/// Dial `/agent/ws`, returning `Ok` for an accepted upgrade or `Err(status)` for
+/// an HTTP refusal (the pre-upgrade `401`).
+async fn dial_status(addr: SocketAddr, credential: Option<&str>) -> Result<(), u16> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
+    use tokio_tungstenite::tungstenite::http::HeaderValue;
+
+    let mut request = format!("ws://{addr}/agent/ws")
+        .into_client_request()
+        .expect("request");
+    if let Some(credential) = credential {
+        request.headers_mut().insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {credential}")).expect("header"),
+        );
+    }
+    match tokio_tungstenite::connect_async(request).await {
+        Ok(_) => Ok(()),
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            Err(response.status().as_u16())
+        }
+        Err(_) => Err(0),
+    }
+}
+
+/// Spawn a fake agent against the hub and hand back its task, so a test can
+/// assert whether it ever registered.
+fn spawn_agent(test: &TestHub, agent: FakeAgent) -> tokio::task::JoinHandle<()> {
+    let url = test.ws_url();
+    tokio::spawn(async move {
+        let _ = agent.run(&url).await;
+    })
+}
+
+#[tokio::test]
+async fn an_anonymous_dial_is_refused_when_auth_is_on() {
+    let test = start_hub(Config {
+        status_poll_ms: 50,
+        agent_tokens: tokens(&[("a2a-goose-dev", "s3cret")]),
+        ..Config::default()
+    })
+    .await;
+
+    // No credential: refused at the handshake, before any `hello`.
+    assert_eq!(dial_status(test.addr, None).await, Err(401));
+
+    // A well-formed credential is let through the handshake.
+    assert!(dial_status(test.addr, Some("s3cret")).await.is_ok());
+}
+
+#[tokio::test]
+async fn an_agent_with_the_right_credential_connects() {
+    let test = start_hub(Config {
+        status_poll_ms: 50,
+        agent_tokens: tokens(&[("a2a-goose-dev", "s3cret")]),
+        ..Config::default()
+    })
+    .await;
+
+    let _task = spawn_agent(
+        &test,
+        FakeAgent::new("a2a-goose-dev")
+            .credential("s3cret")
+            .replay_interval(Duration::from_millis(20)),
+    );
+
+    let hub = Arc::clone(&test.hub);
+    assert!(
+        wait_for(Duration::from_secs(5), || hub
+            .agent_view("a2a-goose-dev", 0)
+            .is_some_and(|view| view.connected))
+        .await,
+        "the authenticated agent should have registered"
+    );
+}
+
+#[tokio::test]
+async fn a_wrong_credential_never_registers() {
+    let test = start_hub(Config {
+        status_poll_ms: 50,
+        agent_tokens: tokens(&[("a2a-goose-dev", "s3cret")]),
+        ..Config::default()
+    })
+    .await;
+
+    // Right name, wrong token: passes the handshake, then refused at the hello.
+    let _task = spawn_agent(
+        &test,
+        FakeAgent::new("a2a-goose-dev").credential("wrong-token"),
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        test.hub.snapshot(0).is_empty(),
+        "an agent with the wrong token must not appear in the fleet"
+    );
+}
+
+#[tokio::test]
+async fn an_agent_cannot_claim_another_agents_identity() {
+    let test = start_hub(Config {
+        status_poll_ms: 50,
+        agent_tokens: tokens(&[("a2a-goose-dev", "s3cret")]),
+        ..Config::default()
+    })
+    .await;
+
+    // `s3cret` is valid, but it belongs to `a2a-goose-dev`; `nas-goose` is not
+    // in the map, so the token must not let it claim that identity.
+    let _task = spawn_agent(&test, FakeAgent::new("nas-goose").credential("s3cret"));
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        test.hub.agent_view("nas-goose", 0).is_none(),
+        "a valid token must not authenticate a different agentId"
+    );
+}
