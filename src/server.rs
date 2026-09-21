@@ -13,7 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -39,6 +40,16 @@ pub fn app(hub: Arc<Hub>) -> Router {
         .route("/api/fleet", get(fleet))
         .route("/api/agents/{id}", get(agent))
         .route("/api/agents/{id}/activity", get(agent_activity))
+        .route("/api/agents/{id}/history/sessions", get(history_sessions))
+        .route("/api/agents/{id}/history/search", get(history_search))
+        .route(
+            "/api/agents/{id}/history/sessions/{session}",
+            get(history_session),
+        )
+        .route(
+            "/api/agents/{id}/history/sessions/{session}/messages",
+            get(history_messages),
+        )
         .route("/events", get(events))
         .route("/agent/ws", get(agent_ws))
         .fallback_service(ServeDir::new(static_dir))
@@ -75,6 +86,80 @@ fn not_found(id: &str) -> Response {
         Json(json!({ "error": "unknown_agent", "agentId": id })),
     )
         .into_response()
+}
+
+/// `history.*` is request/response over the agent's tunnel (§5.4): the hub
+/// carries the query, the agent's own schema guard answers it, and the result
+/// is proxied to the browser and dropped — never cached (§5.6).
+async fn history_sessions(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    proxy(&hub, &id, "history.sessions", query_params(query)).await
+}
+
+async fn history_search(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    proxy(&hub, &id, "history.search", query_params(query)).await
+}
+
+async fn history_session(
+    State(hub): State<Arc<Hub>>,
+    Path((id, session)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let mut params = query_params(query);
+    params["id"] = json!(session);
+    proxy(&hub, &id, "history.session", params).await
+}
+
+async fn history_messages(
+    State(hub): State<Arc<Hub>>,
+    Path((id, session)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let mut params = query_params(query);
+    params["id"] = json!(session);
+    proxy(&hub, &id, "history.messages", params).await
+}
+
+fn query_params(query: HashMap<String, String>) -> Value {
+    Value::Object(
+        query
+            .into_iter()
+            .map(|(key, value)| (key, json!(value)))
+            .collect(),
+    )
+}
+
+async fn proxy(hub: &Arc<Hub>, agent_id: &str, method: &str, params: Value) -> Response {
+    let Some(view) = hub.agent_view(agent_id, now_ms()) else {
+        return not_found(agent_id);
+    };
+    if !view.connected {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "agent_unreachable", "agentId": agent_id })),
+        )
+            .into_response();
+    }
+    match hub.request(agent_id, method, params).await {
+        Ok(body) => Json(json!({ "ok": true, "body": body })).into_response(),
+        Err(error) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": "agent_error",
+                "agentId": agent_id,
+                "method": method,
+                "message": error.to_string()
+            })),
+        )
+            .into_response(),
+    }
 }
 
 /// The browser's live feed: a full fleet snapshot, then every hub event.

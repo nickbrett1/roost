@@ -84,3 +84,73 @@ export function stateLabel(state) {
 	if (state === "live") return "live";
 	return state ?? "unknown";
 }
+
+/** Shared JSON GET that raises on a non-2xx response. */
+async function getJson(fetchImpl, path) {
+	const response = await fetchImpl(path);
+	if (!response.ok) throw new Error(`request failed: ${response.status}`);
+	return response.json();
+}
+
+/**
+ * An agent's past sessions (memo §4.5). The hub proxies this over the tunnel.
+ *
+ * @param {string} agentId
+ * @param {{ cwd?: string, q?: string, limit?: number }} [options]
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<Array<object>>}
+ */
+export async function fetchHistorySessions(agentId, options = {}, fetchImpl = globalThis.fetch) {
+	const params = new URLSearchParams();
+	if (options.cwd) params.set("cwd", options.cwd);
+	if (options.q) params.set("q", options.q);
+	if (options.limit) params.set("limit", String(options.limit));
+	const suffix = params.toString() ? `?${params}` : "";
+	const body = await getJson(
+		fetchImpl,
+		`/api/agents/${encodeURIComponent(agentId)}/history/sessions${suffix}`
+	);
+	return Array.isArray(body.body?.sessions) ? body.body.sessions : [];
+}
+
+/**
+ * Search an agent's transcripts.
+ *
+ * @param {string} agentId
+ * @param {string} q
+ * @param {typeof fetch} [fetchImpl]
+ */
+export async function searchHistory(agentId, q, fetchImpl = globalThis.fetch) {
+	const params = new URLSearchParams({ q });
+	const body = await getJson(
+		fetchImpl,
+		`/api/agents/${encodeURIComponent(agentId)}/history/search?${params}`
+	);
+	return Array.isArray(body.body?.matches) ? body.body.matches : [];
+}
+
+/**
+ * One session's transcript, paginated.
+ *
+ * @param {string} agentId
+ * @param {string} sessionId
+ * @param {{ cursor?: string, limit?: number }} [options]
+ * @param {typeof fetch} [fetchImpl]
+ */
+export async function fetchHistoryMessages(
+	agentId,
+	sessionId,
+	options = {},
+	fetchImpl = globalThis.fetch
+) {
+	const params = new URLSearchParams();
+	if (options.cursor) params.set("cursor", options.cursor);
+	if (options.limit) params.set("limit", String(options.limit));
+	const suffix = params.toString() ? `?${params}` : "";
+	const body = await getJson(
+		fetchImpl,
+		`/api/agents/${encodeURIComponent(agentId)}/history/sessions/${encodeURIComponent(sessionId)}/messages${suffix}`
+	);
+	const inner = body.body ?? {};
+	return { messages: inner.messages ?? [], nextCursor: inner.nextCursor ?? null };
+}

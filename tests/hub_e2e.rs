@@ -12,6 +12,7 @@ use roost::config::Config;
 use roost::fake_agent::{FakeAgent, Scenario};
 use roost::fleet::{AgentStateName, Hub};
 use roost::server;
+use serde_json::json;
 
 struct TestHub {
     hub: Arc<Hub>,
@@ -261,4 +262,112 @@ async fn a_tunnel_that_sends_activity_before_hello_is_rejected() {
     // The hub closes the tunnel without ever registering the agent.
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(test.hub.snapshot(0).is_empty());
+}
+
+#[tokio::test]
+async fn history_is_proxied_over_the_tunnel() {
+    let test = start_hub(Config {
+        status_poll_ms: 50,
+        ..Config::default()
+    })
+    .await;
+
+    let agent = FakeAgent::new("a2a-goose-dev").scenario(Scenario::Idle);
+    let task = tokio::spawn({
+        let agent = agent.clone();
+        let url = test.ws_url();
+        async move { agent.run(&url).await }
+    });
+    let hub = Arc::clone(&test.hub);
+    assert!(
+        wait_for(Duration::from_secs(5), || hub
+            .agent_view("a2a-goose-dev", 0)
+            .is_some_and(|view| view.connected))
+        .await,
+        "the agent should connect"
+    );
+
+    // Over the wire: the hub asks, the agent answers.
+    let body = test
+        .hub
+        .request(
+            "a2a-goose-dev",
+            "history.sessions",
+            json!({ "cwd": "/workspaces/roost" }),
+        )
+        .await
+        .expect("history.sessions");
+    assert_eq!(body["sessions"].as_array().unwrap().len(), 2);
+
+    // Through the browser route.
+    let (status, body) = http_get(
+        test.addr,
+        "/api/agents/a2a-goose-dev/history/sessions?cwd=/workspaces/roost",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("sess_0001") && body.contains("sess_0002"),
+        "got {body}"
+    );
+
+    // Search.
+    let (status, body) = http_get(
+        test.addr,
+        "/api/agents/a2a-goose-dev/history/search?q=history",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(body.contains("sess_0001"));
+
+    // A paginated transcript.
+    let (status, body) = http_get(
+        test.addr,
+        "/api/agents/a2a-goose-dev/history/sessions/sess_0001/messages?limit=2",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(body.contains("nextCursor"));
+
+    // An unknown agent never reaches the tunnel: typed 404.
+    let (status, _) = http_get(test.addr, "/api/agents/nobody/history/sessions").await;
+    assert_eq!(status, 404);
+
+    task.abort();
+}
+
+#[tokio::test]
+async fn history_to_an_unreachable_agent_is_503() {
+    let test = start_hub(Config {
+        status_poll_ms: 50,
+        ..Config::default()
+    })
+    .await;
+
+    let agent = FakeAgent::new("a2a-goose-dev").scenario(Scenario::Idle);
+    let task = tokio::spawn({
+        let agent = agent.clone();
+        let url = test.ws_url();
+        async move { agent.run(&url).await }
+    });
+    let hub = Arc::clone(&test.hub);
+    assert!(
+        wait_for(Duration::from_secs(5), || hub
+            .agent_view("a2a-goose-dev", 0)
+            .is_some_and(|view| view.connected))
+        .await
+    );
+    task.abort();
+
+    let hub = Arc::clone(&test.hub);
+    assert!(
+        wait_for(Duration::from_secs(5), || hub
+            .agent_view("a2a-goose-dev", 0)
+            .is_some_and(|view| !view.connected))
+        .await,
+        "the tunnel should have dropped"
+    );
+
+    let (status, _) = http_get(test.addr, "/api/agents/a2a-goose-dev/history/sessions").await;
+    assert_eq!(status, 503);
 }
