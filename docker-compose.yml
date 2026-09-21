@@ -24,3 +24,5 @@ services:
       - "homepage.href=http://localhost:3008/"
       - "homepage.widget.type=customapi"
       - "homepage.widget.url=http://localhost:3008/healthz"
+      - "homepage.widget.mappings[0].field=status"
+      - "homepage.widget.mappings[0].label=Status"
