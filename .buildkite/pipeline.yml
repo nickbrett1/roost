@@ -49,10 +49,50 @@ steps:
       - cargo build --locked
       - cargo test --locked
 
+  - label: ":male-doctor: Smoke test image (starts and serves HTTP)"
+    key: docker_smoke
+    depends_on:
+      - build
+    agents:
+      queue: mac-studio-linux
+    env:
+      SMOKE_IMAGE: roost-smoke
+    commands:
+      - >-
+        docker build -t "$$SMOKE_IMAGE:$$BUILDKITE_COMMIT" .
+      - |
+        set -euo pipefail
+        CONTAINER="$$SMOKE_IMAGE-$$BUILDKITE_JOB_ID"
+        trap 'docker rm -f "$$CONTAINER" >/dev/null 2>&1 || true' EXIT
+        docker run -d --name "$$CONTAINER" "$$SMOKE_IMAGE:$$BUILDKITE_COMMIT" >/dev/null
+        # Poll the DECLARED healthcheck. A container that exits (the old rust
+        # stub restart-looped) is a failure, so running is checked as well as
+        # health: "not running" is reported with its logs, never mistaken for a
+        # slow start.
+        for i in $$(seq 1 30); do
+          RUNNING="$$(docker inspect -f '{{.State.Running}}' "$$CONTAINER" 2>/dev/null || echo false)"
+          HEALTH="$$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$$CONTAINER" 2>/dev/null || echo unknown)"
+          echo "attempt $$i: running=$$RUNNING health=$$HEALTH"
+          if [ "$$HEALTH" = "healthy" ]; then
+            echo "image starts and serves HTTP (healthcheck passed)"
+            exit 0
+          fi
+          if [ "$$RUNNING" != "true" ]; then
+            echo "container is not running - it exited instead of serving:" >&2
+            docker logs "$$CONTAINER" >&2 || true
+            exit 1
+          fi
+          sleep 2
+        done
+        echo "container never became healthy:" >&2
+        docker logs "$$CONTAINER" >&2 || true
+        exit 1
+
   - label: ":docker: Build and publish image (GHCR)"
     key: docker_publish
     depends_on:
       - build
+      - docker_smoke
     if: build.branch == "main"
     agents:
       queue: mac-studio-linux

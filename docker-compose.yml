@@ -21,6 +21,6 @@ services:
       - "com.centurylinklabs.watchtower.enable=true"
       - "homepage.group=Services"
       - "homepage.name=roost"
-      - "homepage.href=http://nas:3008/"
+      - "homepage.href=http://localhost:3008/"
       - "homepage.widget.type=customapi"
       - "homepage.widget.url=http://localhost:3008/healthz"

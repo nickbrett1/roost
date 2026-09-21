@@ -11,12 +11,21 @@ of its own here — a plain Vite build, or SvelteKit's `adapter-static`.
 
 ## Who serves it
 
-The **`rust` server is the web server**, and it owns `/healthz`. Point it
-at `web/dist`, either at **compile time** (e.g.
-`rust-embed` or `include_dir!`) or at **runtime** from disk — both are copied
-into the image by the Dockerfile. There is **no Node runtime** in the image.
-genproj scaffolds the assets and this seam, not the serving code, so implement
-`/healthz` (and the static file route) in the `rust` app.
+The **`rust` server is the web server**. There is **no Node runtime** in
+the image: the frontend is built here and its `web/dist`
+output is copied into the image by the Dockerfile.
+
+genproj scaffolds a **minimal serving harness** as the `rust`
+entry point (`src/main.rs`): it binds `0.0.0.0` on the container port
+(3000 unless `docker-container.exposePort` says otherwise), serves
+`web/dist`, answers the declared healthcheck path with
+200, and 404s everything else. That is what makes the container come up and pass
+its own `HEALTHCHECK` - the harness half of the project.
+
+The **domain half is yours**: the wire protocol, the business endpoints, and
+anything you want the server to do beyond serving the UI. Replace the harness
+(and its standard-library-only constraint) with your application whenever you
+are ready.
 
 ## How it is built
 

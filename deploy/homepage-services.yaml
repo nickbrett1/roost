@@ -12,7 +12,7 @@
 
 - roost:
     icon: sh-docker
-    href: http://nas:3008/
+    href: http://localhost:3008/
     description: roost container
     widget:
       type: customapi
