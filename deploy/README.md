@@ -6,12 +6,12 @@
 
 ## 1. Build & publish the image
 
-The repository's CircleCI config contains a `docker-publish` job that builds
-the image for `linux/amd64` and pushes it to
+The repository's Buildkite pipeline contains a `docker_publish` step that
+builds the image for `linux/amd64` and pushes it to
 `ghcr.io/nickbrett1/roost` on every push to
 `main` (tagged with the commit SHA and `latest`).
 
-Builds use a **registry-backed BuildKit cache**: each `docker-publish` run
+Builds use a **registry-backed BuildKit cache**: each `docker_publish` run
 pulls the previous layer cache from the `:buildcache` tag
 (`ghcr.io/nickbrett1/roost:buildcache`) and
 pushes it back with `mode=max`, so only changed layers rebuild. The first run
@@ -21,10 +21,11 @@ artifact and is never used as a deployable image.
 
 - The registry namespace (`nickbrett1`) is derived from the
   authenticated GitHub identity at generation time.
-- Registry credentials are read from the CircleCI context (`common`):
+- Registry credentials are read from Doppler (`common`/`prd`) at run time on the
+  Buildkite agent (this project selects the `doppler` capability):
   - `GHCR_USERNAME` — the GitHub account name
-  - `GHCR_TOKEN` — a **classic** PAT with the `write:packages` scope, used to
-    `docker login`/push to GHCR
+  - `GHCR_UPDATE_TOKEN` — a **classic** PAT with the `write:packages` scope,
+    fetched at run time and used to `docker login`/push to GHCR
 - **Package visibility** defaults to `public` (so the NAS/Watchtower can pull
   with **no credentials**). The generated Dockerfile carries
   `org.opencontainers.image.source=https://github.com/nickbrett1/roost`,
@@ -33,19 +34,22 @@ artifact and is never used as a deployable image.
   the repo private (or set `imageVisibility: private` in the genproj config;
   then `docker login` is required on the NAS — see section 3).
 
-### One-time CI setup (CircleCI context)
+### One-time CI setup (Buildkite agent + Doppler)
 
-Before the first push can publish an image, the CircleCI context must exist
-with the registry credentials:
+Before the first push can publish an image:
 
-1. CircleCI -> Organization Settings -> Contexts -> Create Context, and name
-   it `common` (this is what the generated pipeline reads).
-2. Add these environment variables to the context:
-   - `GHCR_USERNAME` = your GitHub username
-   - `GHCR_TOKEN` = a **classic** personal access token with the
+1. The Buildkite pipeline and its GitHub webhook are created during generation,
+   so there is no manual pipeline step. The job is dispatched to the
+   self-hosted agent queue (`mac-studio-linux`).
+2. The publish step fetches its registry credential from Doppler at run time, so
+   the `common`/`prd` config must hold:
+   - `GHCR_UPDATE_TOKEN` = a **classic** personal access token with the
      `write:packages` scope — create one at
      https://github.com/settings/tokens/new?scopes=write:packages (the UI
      auto-selects the `repo` scope alongside it)
+3. The agent's `environment` hook must carry `DOPPLER_TOKEN` so the step can
+   reach Doppler. The registry token itself never enters the agent environment,
+   where every job on the fleet could read it.
 
 > GitHub **fine-grained** PATs cannot access the Container registry (GHCR)
 > yet, and offer no "Packages: read & write" permission — do not use one here.

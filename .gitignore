@@ -4,10 +4,13 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+coverage
 
 # SvelteKit
 .svelte-kit
 build
+# Vite build output (the rust server serves whatever is in here)
+dist
 .env
 .env.*
 !.env.example

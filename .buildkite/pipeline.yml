@@ -27,6 +27,7 @@ steps:
         if [ -n "$$PINNED" ]; then npm install -g "npm@$$PINNED"; fi
       - if [ -f package-lock.json ]; then npm ci --no-audit --no-fund --prefer-offline; else npm install --no-audit --no-fund; fi
       - npm run build
+      - npm test
 
   - label: ":hammer: Build and test (rust)"
     key: build
