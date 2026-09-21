@@ -1,6 +1,81 @@
 # roost
 
-A roost project generated with genproj
+Mission control for the a2a-goose fleet: one hub that shows every agent, what
+each one is doing right now, and (later) lets you act on one without visiting
+its host. The design is the memo *"Mission control for the a2a-goose fleet"*;
+this repository is its implementation, built hub-first against a **fake agent**
+so the wire contract is defined before any real agent changes.
+
+## The shape
+
+- **The hub** (this repo, `roost`) — one process, one exposed surface, the only
+  UI: the fleet view, history browsing, and control.
+- **The agent** — provides data and can be restarted. It renders nothing.
+
+Every agent **dials out** to the hub and keeps one long-lived WebSocket open
+(`/agent/ws`). That gives agent→hub push (the live feed) and hub→agent
+request/response (history, reboot) on one connection, with no per-host listen
+surface. The hub is a **router, not a store**: transcripts stay in goose's
+`sessions.db` on their own host and are only ever proxied.
+
+### The wire (three verbs, memo §5)
+
+| direction | frame | purpose |
+| --- | --- | --- |
+| agent → hub | `hello` | identity: `agentId`, `host`, `kind`, `agentVersion`, `protocolVersion`, `bootId`, `skills`, `capabilities` |
+| agent → hub | `activity` | one §3.1 `/events` envelope, forwarded verbatim, tagged with `bootId` |
+| agent → hub | `log` | bounded log tail (opt-in; not wired in M0) |
+| hub → agent | `request` | `status.get`, `sessions.list`, `history.*`, `logs.tail` — answered by `response` |
+| hub → agent | `command` | `reboot` with `mode: "preflight"` (M4) — answered by `response` |
+
+Ordering is `(agentId, bootId, seq)`: `seq` resets when an agent restarts, so a
+reboot is a new stream, never the last one going backwards. Unknown frame and
+event types are ignored, never fatal — version skew is the normal state.
+
+## The hub's surfaces
+
+- `/agent/ws` — agents tunnel in (outbound from the agent).
+- `/api/fleet` — the fleet snapshot (JSON).
+- `/api/agents/{id}` and `/api/agents/{id}/activity` — one agent, and its recent
+  bounded ring.
+- `/events` — the browser's SSE fan-out (`event: hub`).
+- `/healthz` — JSON healthcheck (Homepage parses the body).
+- everything else — the built Svelte bundle in `web/dist`.
+
+## Running it locally
+
+```sh
+# terminal 1 — the hub (serves web/dist, so build it first)
+cd web && npm install && npm run build && cd ..
+cargo run
+
+# terminal 2 — a fake agent (memo §8.1)
+cargo run --bin fake_agent -- --scenario happy
+cargo run --bin fake_agent -- --scenario stuck --id a2a-goose-nas
+```
+
+Then open <http://127.0.0.1:3000/>. Configuration is environment-driven:
+`PORT`, `ROOST_STATIC_DIR`, `ROOST_STUCK_AFTER_MS`, `ROOST_STATUS_POLL_MS`,
+`ROOST_RING_SIZE`. The fake agent reads `ROOST_HUB_URL`.
+
+## Tests
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --locked            # unit + end-to-end (real hub + real fake agent)
+cd web && npm test             # vitest, coverage-gated
+```
+
+The end-to-end tests in `tests/hub_e2e.rs` stand a real hub up on an ephemeral
+port and drive it with the fake agent over a real WebSocket.
+
+## Status
+
+M0 — the hub, standing up: the wire's `hello` + `activity` + `request` frames,
+the fleet view with liveness and stuck detection, and the fake agent. Read-only.
+History (`history.*`, M1/M3), real-agent conformance (M2) and commands (M4)
+follow.
 
 ## Capabilities
 
@@ -15,16 +90,6 @@ This project includes the following capabilities:
 - **Doppler Secrets Management**: Integrates Doppler for secure secrets management. Enables the various MCP servers that rely on privileged tokens to access their services (e.g. Buildkite, CircleCI, GitHub, SonarQube).
 - **Clippy (Rust code quality)**: Adds fast, zero-configuration Rust linting and formatting via cargo clippy and cargo fmt. Lint locally with `cargo clippy --all-targets -- -D warnings`. Requires a Rust devcontainer.
 - **Dependabot**: Configures Dependabot for automated dependency updates.
-
-## Setup
-
-1. Clone the repository
-2. Build and run the checks:
-
-   ```bash
-   cargo build
-   cargo test
-   ```
 
 ## Doppler
 
@@ -62,8 +127,7 @@ doppler setup --no-interactive --project common --config dev
 
 ## Deployment
 
-See `deploy/README.md` for the deployment runbook (CircleCI -> GHCR ->
-Watchtower -> Docker host). Deploy with:
+See `deploy/README.md` for the deployment runbook. Deploy with:
 
 ```bash
 docker compose up -d

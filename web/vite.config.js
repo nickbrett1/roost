@@ -7,6 +7,9 @@ export default defineConfig({
     passWithNoTests: true,
     reporter: ["default"],
     coverage: {
+      // Measure only the framework-free logic in src/lib. Components are
+      // exercised in the browser, not by a jsdom harness here.
+      include: ["src/lib/**/*.js"],
       reporter: ["lcov", "text"],
       thresholds: {
         statements: 80,
