@@ -120,6 +120,12 @@ steps:
         # specs/015-genproj-docker-publish-idempotent).
         export DOCKER_CONFIG="/tmp/bk-docker-$$BUILDKITE_JOB_ID"
         mkdir -p "$$DOCKER_CONFIG"
+        # DOCKER_CONFIG also relocates the CLI-plugin directory, so the empty
+        # config dir hides docker-buildx and every buildx call below dies as an
+        # unknown ROOT flag - "unknown flag: --bootstrap", exit 125 - before the
+        # push ever happens. Link the real plugin dir back in, so the config
+        # stays per-job and buildx stays reachable. Mirrors the genproj fix.
+        ln -sfn "$$HOME/.docker/cli-plugins" "$$DOCKER_CONFIG/cli-plugins"
         BUILDX_BUILDER_NAME="bk-$$BUILDKITE_PIPELINE_SLUG-$$BUILDKITE_JOB_ID"
         trap 'rm -rf "$$DOCKER_CONFIG"; docker buildx rm "$$BUILDX_BUILDER_NAME" >/dev/null 2>&1 || true' EXIT
         echo "$$GHCR_TOKEN" | docker login ghcr.io -u "$$GHCR_USERNAME" --password-stdin
