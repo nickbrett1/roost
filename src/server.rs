@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -183,13 +184,53 @@ fn sse_event(event: &HubEvent) -> Event {
     Event::default().event("hub").data(data)
 }
 
-async fn agent_ws(ws: WebSocketUpgrade, State(hub): State<Arc<Hub>>) -> Response {
-    ws.on_upgrade(move |socket| handle_agent(socket, hub))
+/// The agent tunnel (§5.1, §7.1).
+///
+/// A `Bearer` credential is read from the handshake and checked twice: the
+/// header must be present when authentication is on (refused here, before the
+/// upgrade, so an anonymous dial gets a plain `401`), and after the `hello` the
+/// token must belong to the `agentId` it claims — knowing one agent's token must
+/// not let it claim another's identity. Authentication is off only when no
+/// `ROOST_AGENT_TOKENS` are configured.
+async fn agent_ws(
+    ws: WebSocketUpgrade,
+    State(hub): State<Arc<Hub>>,
+    headers: HeaderMap,
+) -> Response {
+    let presented = bearer_token(&headers);
+    if hub.config().agent_auth_enabled() && presented.is_none() {
+        return unauthorized("missing_credential");
+    }
+    ws.on_upgrade(move |socket| handle_agent(socket, hub, presented))
+}
+
+/// The `Bearer` token from `Authorization`, if there is a well-formed one.
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim();
+    (!token.is_empty()).then(|| token.to_string())
+}
+
+/// A `401` for a dial that carries no credential.
+fn unauthorized(reason: &str) -> Response {
+    let mut response = (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({ "error": "unauthorized", "reason": reason })),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+    response
 }
 
 /// Drive one agent's tunnel for its whole life. On exit the agent is marked
 /// offline, so a dropped connection reads as "unreachable", never as live.
-async fn handle_agent(socket: WebSocket, hub: Arc<Hub>) {
+async fn handle_agent(socket: WebSocket, hub: Arc<Hub>, presented: Option<String>) {
     let (mut sink, mut stream) = socket.split();
 
     let hello = match read_hello(&mut stream).await {
@@ -200,6 +241,18 @@ async fn handle_agent(socket: WebSocket, hub: Arc<Hub>) {
         }
     };
     let agent_id = hello.agent_id.clone();
+
+    // Identity is only known now, so this is where a token is bound to the
+    // `agentId` it claims (§7.1). A mismatch is refused before registering: an
+    // unauthenticated agent must never appear in the fleet.
+    if !hub
+        .config()
+        .agent_token_matches(&agent_id, presented.as_deref())
+    {
+        eprintln!("agent {agent_id} rejected: credential does not match");
+        let _ = sink.send(Message::Close(None)).await;
+        return;
+    }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Outbound>();
     let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));

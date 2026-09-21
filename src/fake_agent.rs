@@ -12,6 +12,9 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::protocol::{ActivityFrame, Hello, RequestFrame, ServerFrame, PROTOCOL_VERSION};
@@ -53,6 +56,9 @@ pub struct FakeAgent {
     pub boot_id: String,
     pub scenario: Scenario,
     pub replay_interval: Duration,
+    /// Credential sent as `Authorization: Bearer` on the handshake. `None` dials
+    /// anonymously, which only works when the hub has no tokens configured.
+    pub credential: Option<String>,
 }
 
 impl FakeAgent {
@@ -65,7 +71,15 @@ impl FakeAgent {
             boot_id: "7f3c1a9e".to_string(),
             scenario: Scenario::Happy,
             replay_interval: Duration::from_millis(250),
+            credential: None,
         }
+    }
+
+    /// Dial the hub with this credential. The real agent reads its own from
+    /// `hub.credentialEnv`; the fake takes it directly.
+    pub fn credential(mut self, credential: impl Into<String>) -> Self {
+        self.credential = Some(credential.into());
+        self
     }
 
     pub fn scenario(mut self, scenario: Scenario) -> Self {
@@ -105,7 +119,12 @@ impl FakeAgent {
 
     /// Connect, greet, replay, and answer requests until the tunnel closes.
     pub async fn run(&self, url: &str) -> anyhow::Result<()> {
-        let (socket, _response) = tokio_tungstenite::connect_async(url).await?;
+        let mut request = url.into_client_request()?;
+        if let Some(credential) = &self.credential {
+            let value = HeaderValue::from_str(&format!("Bearer {credential}"))?;
+            request.headers_mut().insert(AUTHORIZATION, value);
+        }
+        let (socket, _response) = tokio_tungstenite::connect_async(request).await?;
         let (mut sink, mut stream) = socket.split();
 
         sink.send(Message::Text(hello_frame(&self.hello()).to_string().into()))

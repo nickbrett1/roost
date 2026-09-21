@@ -58,6 +58,18 @@ Then open <http://127.0.0.1:3000/>. Configuration is environment-driven:
 `PORT`, `ROOST_STATIC_DIR`, `ROOST_STUCK_AFTER_MS`, `ROOST_STATUS_POLL_MS`,
 `ROOST_RING_SIZE`. The fake agent reads `ROOST_HUB_URL`.
 
+`ROOST_AGENT_TOKENS` gates the agent tunnel (§7.1). It is a comma-separated map
+of `agentId=token`, e.g.:
+
+```sh
+ROOST_AGENT_TOKENS='mac-studio-goose=s3cret,nas-goose=other' cargo run
+```
+
+When it is set, a dial to `/agent/ws` must carry `Authorization: Bearer <token>`
+and the token must belong to the `agentId` the `hello` claims — one agent's token
+does not authenticate another's identity. When it is **unset**, authentication is
+off: the tailnet is then the only boundary, and the hub says so on startup.
+
 ## Tests
 
 ```sh
@@ -74,8 +86,17 @@ port and drive it with the fake agent over a real WebSocket.
 
 M0 — the hub, standing up: the wire's `hello` + `activity` + `request` frames,
 the fleet view with liveness and stuck detection, and the fake agent. Read-only.
-History (`history.*`, M1/M3), real-agent conformance (M2) and commands (M4)
-follow.
+
+M1 — history: `history.*` over the agent's tunnel, the sessions/search/transcript
+drill-down, and the hub-side proxy routes.
+
+M2a — real-agent conformance: the `a2a-goose` tunnel client (dial out, `hello`,
+publish the activity feed, answer `status.get` / `sessions.list`), and **agent
+authentication** here on the hub: `/agent/ws` requires a per-agent `Bearer` token
+when `ROOST_AGENT_TOKENS` is set.
+
+Still to come: `history.*` answered by the real agent over goose's `sessions.db`
+(M2b), the live turn view beside History, and commands (M4).
 
 ## Capabilities
 
