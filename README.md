@@ -6,18 +6,16 @@ A roost project generated with genproj
 
 This project includes the following capabilities:
 
-- **Editor Configuration**: Shared VS Code extensions and workspace settings for consistent tooling across the team.
-- **Shell & Terminal**: Zsh shell with the Powerlevel10k prompt and productivity plugins.
 - **Docker**: Adds Docker support for containerised builds and tooling.
 - **Rust DevContainer**: Sets up a VS Code DevContainer with Rust environment.
 - **Node.js DevContainer**: Sets up a VS Code DevContainer with Node.js environment.
-- **SvelteKit**: Initializes a SvelteKit project with Svelte 5.
-- **Clippy (Rust code quality)**: Adds fast, zero-configuration Rust linting and formatting via cargo clippy and cargo fmt. Lint locally with `cargo clippy --all-targets -- -D warnings`. Requires a Rust devcontainer.
+- **Svelte**: Initializes a Svelte 5 + Vite frontend built to static assets. Frontend only: no adapter, no server routes, no server of any kind. The project's primary-language server serves the built files.
 - **Docker Container**: Containerize the project and publish to the GitHub Container Registry (GHCR) for deployment to a NAS or self-hosted host via Docker Compose. Mutually exclusive with other deployment systems.
 - **Buildkite Integration**: Runs CI on a self-hosted Buildkite agent (Apple silicon) instead of a metered cloud fleet. The pipeline and its GitHub webhook are created during generation, so there is no manual "set up project" step. Can run alongside CircleCI, so a repository can migrate without a flag day.
 - **Doppler Secrets Management**: Integrates Doppler for secure secrets management. Enables the various MCP servers that rely on privileged tokens to access their services (e.g. Buildkite, CircleCI, GitHub, SonarQube).
 - **AI Coding Agents**: Sets up the AI coding agents in the devcontainer: goose (config, MCP servers and spec-first recipes) plus the Cursor and Antigravity CLIs.
 - **Container Agent**: Every generated devcontainer brings up and registers its own a2a-goose agent (`<repo>-dev`), reached over the tailnet by the LiteLLM proxy; reuses the a2a-goose GitHub release channel, so the container has the same self-update path as a host.
+- **Clippy (Rust code quality)**: Adds fast, zero-configuration Rust linting and formatting via cargo clippy and cargo fmt. Lint locally with `cargo clippy --all-targets -- -D warnings`. Requires a Rust devcontainer.
 - **Dependabot**: Configures Dependabot for automated dependency updates.
 
 ## Setup

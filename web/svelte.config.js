@@ -1,12 +1,6 @@
-import adapter from "@sveltejs/adapter-node";
+import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
 
-/** @type {import('@sveltejs/kit').Config} */
-const config = {
-  kit: {
-    // adapter-node outputs a standalone Node server (build/index.js) for the Docker container
-    // See https://kit.svelte.dev/docs/adapter-node for more information.
-    adapter: adapter(),
-  },
+/** @type {import("@sveltejs/vite-plugin-svelte").SvelteConfig} */
+export default {
+  preprocess: vitePreprocess(),
 };
-
-export default config;

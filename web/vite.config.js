@@ -1,17 +1,11 @@
-import { sveltekit } from "@sveltejs/kit/vite";
-import { svelteTesting } from "@testing-library/svelte/vite";
-import { defineConfig } from "vite";
+import { svelte } from "@sveltejs/vite-plugin-svelte";
+import { defineConfig } from "vitest/config";
 
 export default defineConfig({
-  plugins: [sveltekit(), svelteTesting()],
+  plugins: [svelte()],
   test: {
-    environment: "jsdom",
-    globals: true,
-    setupFiles: ["src/test-setup.js"],
-    reporter: ["default", "junit"],
-    outputFile: {
-      junit: "./reports/junit.xml",
-    },
+    passWithNoTests: true,
+    reporter: ["default"],
     coverage: {
       reporter: ["lcov", "text"],
       thresholds: {

@@ -8,7 +8,7 @@
 
 # Frontend stage: builds the Svelte app before the rust build below.
 # The rust image has no node, so this is a separate stage rather than a
-# step in the main one. Output lands in web/build/
+# step in the main one. Output lands in web/dist/
 # (see web/README.md).
 FROM node:22-bookworm AS frontend
 WORKDIR /app
@@ -29,7 +29,7 @@ RUN mkdir -p src && echo 'fn main() {}' > src/main.rs \
     && cargo fetch \
     && rm -rf src
 COPY src ./src
-COPY --from=frontend /app/build ./web/build
+COPY --from=frontend /app/dist ./web/dist
 RUN cargo build --release
 
 FROM rust:1-slim
@@ -41,7 +41,7 @@ LABEL org.opencontainers.image.source=https://github.com/nickbrett1/roost
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/target/release/roost /usr/local/bin/roost
-COPY --from=frontend /app/build ./web/build
+COPY --from=frontend /app/dist ./web/dist
 EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s CMD curl -fsS http://127.0.0.1:3000/healthz || exit 1

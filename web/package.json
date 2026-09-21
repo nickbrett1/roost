@@ -7,11 +7,9 @@
   "scripts": {
     "test": "vitest --coverage",
     "test:once": "npx vitest run --changed",
-    "dev": "vite dev",
+    "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview --host 127.0.0.1",
-    "check": "svelte-kit sync && svelte-check",
-    "check:watch": "svelte-kit sync && svelte-check --watch"
+    "preview": "vite preview --host 127.0.0.1"
   },
   "keywords": [],
   "author": "",
@@ -21,21 +19,13 @@
     "npm": ">=11 <12"
   },
   "devDependencies": {
-    "@sveltejs/kit": "^2.70.3",
     "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "svelte": "^5.53.8",
-    "svelte-check": "^4.1.1",
-    "typescript": "^5.7.2",
     "vite": "^8.2.2",
-    "@sveltejs/adapter-node": "^5.4.2",
     "vitest": "^4.1.10",
-    "@vitest/coverage-v8": "^4.1.11",
-    "@testing-library/svelte": "^5.2.0",
-    "@testing-library/jest-dom": "^6.6.0",
-    "jsdom": "^25.0.1"
+    "@vitest/coverage-v8": "^4.1.11"
   },
   "overrides": {
-    "cookie": "^1.0.2",
     "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "vite": "^8.2.2"
   }

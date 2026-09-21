@@ -14,12 +14,9 @@ services:
     restart: unless-stopped
 
     ports:
-      - "127.0.0.1:3008:3000"
+      - "0.0.0.0:3008:3000"
 
-    environment:
-      # Set your environment variables here or in a NAS-side .env file
-      # (genproj never commits secrets). See .env.example.
-
+    environment: {}
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
       - "homepage.group=Services"

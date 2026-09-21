@@ -116,9 +116,6 @@ fi
 
 
 
-echo "INFO: Installing Cursor CLI..."
-curl https://cursor.com/install -fsS | bash
-
 
 
 
