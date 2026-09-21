@@ -15,10 +15,9 @@ Buildkite UI.
   The install is the dominant fixed cost, so it is paid once rather than once
   per step.
 
-The step set is _capability-driven_, exactly as the CircleCI config is: a
-deployment capability adds its deploy step, `gitguardian` adds the secret scan,
-`lighthouse-ci` adds the performance gate. A project that selects none of them
-gets build and test and nothing else.
+The step set is _capability-driven_: a deployment capability adds its deploy
+step, `gitguardian` adds the secret scan, `lighthouse-ci` adds the performance
+gate. A project that selects none of them gets build and test and nothing else.
 
 A `github-release` project with a target ending in `-apple-darwin` also gets a
 **smoke gate**: a native macOS step that runs the built payload
@@ -72,9 +71,8 @@ Provided by the agent's `environment` hook, by name:
   `DOPPLER_TOKEN` lets the step read `GHCR_UPDATE_TOKEN` from Doppler
   (`common`/`prd`) at run time; the registry token is then never in the agent's
   `environment` hook, where every job on the fleet could read it. Without it,
-  provide `GHCR_USERNAME` and `GHCR_TOKEN` in the agent environment — the same
-  names the CircleCI context supplies. Runs on the agent, which has the Docker
-  daemon it needs.
+  provide `GHCR_USERNAME` and `GHCR_TOKEN` in the agent environment. Runs on the
+  agent, which has the Docker daemon it needs.
 
 This list is a bullet list rather than a table on purpose: a generated file has
 to survive `prettier --check` in this project's own lint step, and prettier
