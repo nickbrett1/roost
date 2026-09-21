@@ -17,3 +17,6 @@
     widget:
       type: customapi
       url: http://localhost:3008/healthz
+      mappings:
+        - field: status
+          label: Status
