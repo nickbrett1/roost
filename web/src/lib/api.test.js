@@ -1,5 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
-import { fetchFleet, fleetSummary, openEventStream, relativeAge, stateLabel } from "./api.js";
+import {
+	fetchFleet,
+	fetchHistoryMessages,
+	fetchHistorySessions,
+	fleetSummary,
+	openEventStream,
+	relativeAge,
+	searchHistory,
+	stateLabel
+} from "./api.js";
 
 describe("fetchFleet", () => {
 	it("returns the agents array from the hub", async () => {
@@ -126,5 +135,53 @@ describe("stateLabel", () => {
 	it("passes an unknown state through and handles undefined", () => {
 		expect(stateLabel("rebooting")).toBe("rebooting");
 		expect(stateLabel(undefined)).toBe("unknown");
+	});
+});
+
+describe("history helpers", () => {
+	const ok = (payload) => async () => ({ ok: true, json: async () => payload });
+
+	it("builds the sessions path with filters and unwraps the body", async () => {
+		let called;
+		const fetchImpl = async (path) => {
+			called = path;
+			return { ok: true, json: async () => ({ body: { sessions: [{ sessionId: "s1" }] } }) };
+		};
+		const sessions = await fetchHistorySessions(
+			"a2a-goose-dev",
+			{ cwd: "/workspaces/roost", limit: 2 },
+			fetchImpl
+		);
+		expect(called).toBe(
+			"/api/agents/a2a-goose-dev/history/sessions?cwd=%2Fworkspaces%2Froost&limit=2"
+		);
+		expect(sessions).toEqual([{ sessionId: "s1" }]);
+	});
+
+	it("returns an empty array when the agent has no sessions", async () => {
+		await expect(fetchHistorySessions("a", {}, ok({ body: {} }))).resolves.toEqual([]);
+	});
+
+	it("encodes the search query", async () => {
+		let called;
+		const fetchImpl = async (path) => {
+			called = path;
+			return { ok: true, json: async () => ({ body: { matches: [] } }) };
+		};
+		await searchHistory("a2a-goose-dev", "docker publish", fetchImpl);
+		expect(called).toBe("/api/agents/a2a-goose-dev/history/search?q=docker+publish");
+	});
+
+	it("unwraps messages and the cursor", async () => {
+		const fetchImpl = ok({ body: { messages: [{ role: "user" }], nextCursor: "2" } });
+		await expect(fetchHistoryMessages("a", "s1", {}, fetchImpl)).resolves.toEqual({
+			messages: [{ role: "user" }],
+			nextCursor: "2"
+		});
+	});
+
+	it("raises on a failed response", async () => {
+		const fetchImpl = async () => ({ ok: false, status: 503 });
+		await expect(fetchHistorySessions("a", {}, fetchImpl)).rejects.toThrow("503");
 	});
 });

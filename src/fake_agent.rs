@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::protocol::{ActivityFrame, Hello, ServerFrame, PROTOCOL_VERSION};
+use crate::protocol::{ActivityFrame, Hello, RequestFrame, ServerFrame, PROTOCOL_VERSION};
 
 /// Environment variable the fake agent reads its hub URL from.
 pub const HUB_URL_ENV: &str = "ROOST_HUB_URL";
@@ -135,12 +135,13 @@ impl FakeAgent {
             };
             let response = match frame {
                 ServerFrame::Request(request) => {
-                    response_frame(request.id, self.answer(&request.method))
+                    let body = self.answer(&request);
+                    response_frame(request.id, body)
                 }
-                ServerFrame::Command(command) => response_frame(
-                    command.id,
-                    self.command_body(&command.action, command.mode.as_deref()),
-                ),
+                ServerFrame::Command(command) => {
+                    let body = self.command_body(&command.action, command.mode.as_deref());
+                    response_frame(command.id, body)
+                }
                 ServerFrame::Unknown { .. } => continue,
             };
             if out_tx
@@ -196,8 +197,8 @@ impl FakeAgent {
         })
     }
 
-    fn answer(&self, method: &str) -> Value {
-        match method {
+    fn answer(&self, request: &RequestFrame) -> Value {
+        match request.method.as_str() {
             "status.get" => self.status_body(),
             "sessions.list" => json!({
                 "sessions": [{
@@ -210,11 +211,10 @@ impl FakeAgent {
                     "retained": true
                 }]
             }),
-            // History is M1; the fixtures keep the wire honest until then.
-            "history.sessions" => json!({ "sessions": [], "nextCursor": null }),
-            "history.session" => json!({ "session": null }),
-            "history.messages" => json!({ "messages": [], "nextCursor": null }),
-            "history.search" => json!({ "matches": [] }),
+            "history.sessions" => history_sessions(&request.params),
+            "history.session" => history_session(&request.params),
+            "history.messages" => history_messages(&request.params),
+            "history.search" => history_search(&request.params),
             "logs.tail" => json!({ "lines": [] }),
             _ => json!({}),
         }
@@ -309,10 +309,187 @@ pub fn fixture_events() -> Vec<Value> {
     ]
 }
 
+/// A small, stable transcript corpus for the hub's History mode (memo §4.5).
+fn fixture_sessions() -> Vec<Value> {
+    vec![
+        json!({
+            "sessionId": "sess_0001",
+            "name": "Scaffold the roost hub",
+            "workingDir": "/workspaces/roost",
+            "createdAt": "2026-09-20T02:00:00Z",
+            "updatedAt": "2026-09-20T02:31:07Z",
+            "messageCount": 5,
+            "tokens": 18_432,
+            "cost": 0.42
+        }),
+        json!({
+            "sessionId": "sess_0002",
+            "name": "Fix the docker publish plugin path",
+            "workingDir": "/workspaces/roost",
+            "createdAt": "2026-09-21T12:00:00Z",
+            "updatedAt": "2026-09-21T12:55:00Z",
+            "messageCount": 3,
+            "tokens": 9_012,
+            "cost": 0.19
+        }),
+        json!({
+            "sessionId": "sess_0003",
+            "name": "Review the mission control memo",
+            "workingDir": "/workspaces/a2a-goose",
+            "createdAt": "2026-09-19T09:00:00Z",
+            "updatedAt": "2026-09-19T09:40:00Z",
+            "messageCount": 4,
+            "tokens": 33_210,
+            "cost": 0.77
+        }),
+    ]
+}
+
+fn fixture_messages(session_id: &str) -> Vec<Value> {
+    let lines: Vec<(&str, &str)> = match session_id {
+        "sess_0002" => vec![
+            (
+                "user",
+                "The publish step dies with unknown flag: --bootstrap.",
+            ),
+            (
+                "assistant",
+                "DOCKER_CONFIG relocates the cli-plugins directory.",
+            ),
+            (
+                "assistant",
+                "Link $HOME/.docker/cli-plugins back into the per-job config.",
+            ),
+        ],
+        "sess_0003" => vec![
+            ("user", "Read the mission control memo."),
+            (
+                "assistant",
+                "The agent renders nothing; the hub is the only UI.",
+            ),
+            ("user", "What about history?"),
+            (
+                "assistant",
+                "goose's sessions.db is the record; the hub queries it over the wire.",
+            ),
+        ],
+        _ => vec![
+            ("user", "Add a fake agent to roost."),
+            ("assistant", "Starting with the wire protocol."),
+            ("tool", "Read src/main.rs"),
+            (
+                "assistant",
+                "The hub registers agents and fans out activity.",
+            ),
+            ("user", "Now add history."),
+        ],
+    };
+    lines
+        .iter()
+        .enumerate()
+        .map(|(index, (role, text))| {
+            json!({
+                "index": index,
+                "role": role,
+                "createdAt": format!("2026-09-20T02:0{index}:00Z"),
+                "text": text
+            })
+        })
+        .collect()
+}
+
+/// `history.sessions { cwd, q, limit }` — summaries, newest first.
+fn history_sessions(params: &Value) -> Value {
+    let cwd = params.get("cwd").and_then(Value::as_str);
+    let query = params
+        .get("q")
+        .and_then(Value::as_str)
+        .map(str::to_lowercase);
+    let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
+    let sessions: Vec<Value> = fixture_sessions()
+        .into_iter()
+        .filter(|session| cwd.is_none_or(|cwd| session["workingDir"] == cwd))
+        .filter(|session| {
+            query.as_ref().is_none_or(|q| {
+                session["name"]
+                    .as_str()
+                    .is_some_and(|name| name.to_lowercase().contains(q))
+            })
+        })
+        .take(limit)
+        .collect();
+    json!({ "sessions": sessions, "nextCursor": null })
+}
+
+/// `history.session { id }` — one session's metadata plus its turns.
+fn history_session(params: &Value) -> Value {
+    let id = params.get("id").and_then(Value::as_str).unwrap_or("");
+    match fixture_sessions()
+        .into_iter()
+        .find(|session| session["sessionId"] == id)
+    {
+        Some(session) => json!({ "session": session, "messages": fixture_messages(id) }),
+        None => json!({ "session": null }),
+    }
+}
+
+/// `history.messages { id, cursor, limit }` — paginated transcript.
+fn history_messages(params: &Value) -> Value {
+    let id = params.get("id").and_then(Value::as_str).unwrap_or("");
+    let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(2) as usize;
+    let start = params
+        .get("cursor")
+        .and_then(Value::as_str)
+        .and_then(|cursor| cursor.parse::<usize>().ok())
+        .unwrap_or(0);
+    let all = fixture_messages(id);
+    let page: Vec<Value> = all.iter().skip(start).take(limit).cloned().collect();
+    let end = start + page.len();
+    let next_cursor = if end < all.len() {
+        Value::String(end.to_string())
+    } else {
+        Value::Null
+    };
+    json!({ "sessionId": id, "messages": page, "nextCursor": next_cursor })
+}
+
+/// `history.search { q, limit }` — matches across sessions, grouped by session.
+fn history_search(params: &Value) -> Value {
+    let query = params
+        .get("q")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_lowercase();
+    let limit = params.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
+    if query.is_empty() {
+        return json!({ "matches": [] });
+    }
+    let mut matches = Vec::new();
+    for session in fixture_sessions() {
+        let id = session["sessionId"].as_str().unwrap_or("");
+        let hits: Vec<Value> = fixture_messages(id)
+            .into_iter()
+            .filter(|message| {
+                message["text"]
+                    .as_str()
+                    .is_some_and(|text| text.to_lowercase().contains(&query))
+            })
+            .collect();
+        if !hits.is_empty() {
+            matches.push(json!({
+                "sessionId": id,
+                "name": session["name"],
+                "matches": hits
+            }));
+        }
+    }
+    matches.truncate(limit);
+    json!({ "matches": matches })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn scenario_names_round_trip() {
         assert_eq!(Scenario::from_name("stuck"), Some(Scenario::Stuck));
@@ -349,6 +526,61 @@ mod tests {
         assert_eq!(
             FakeAgent::new("a").scenario(Scenario::Happy).status_body()["acp"]["inFlight"],
             0
+        );
+    }
+
+    #[test]
+    fn history_sessions_filters_by_cwd_and_query() {
+        assert_eq!(
+            history_sessions(&json!({}))["sessions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            history_sessions(&json!({ "cwd": "/workspaces/roost" }))["sessions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            history_sessions(&json!({ "q": "docker" }))["sessions"][0]["sessionId"],
+            "sess_0002"
+        );
+    }
+
+    #[test]
+    fn history_messages_paginate_with_a_cursor() {
+        let first = history_messages(&json!({ "id": "sess_0001", "limit": 2 }));
+        assert_eq!(first["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(first["nextCursor"], "2");
+
+        let last = history_messages(&json!({ "id": "sess_0001", "cursor": "4", "limit": 2 }));
+        assert_eq!(last["messages"].as_array().unwrap().len(), 1);
+        assert!(last["nextCursor"].is_null());
+    }
+
+    #[test]
+    fn history_search_groups_matches_by_session() {
+        let found = history_search(&json!({ "q": "history" }));
+        let matches = found["matches"].as_array().unwrap();
+        assert!(matches
+            .iter()
+            .any(|entry| entry["sessionId"] == "sess_0001"));
+        assert!(history_search(&json!({ "q": "" }))["matches"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn history_session_misses_cleanly() {
+        assert!(history_session(&json!({ "id": "nope" }))["session"].is_null());
+        assert_eq!(
+            history_session(&json!({ "id": "sess_0003" }))["session"]["name"],
+            "Review the mission control memo"
         );
     }
 
