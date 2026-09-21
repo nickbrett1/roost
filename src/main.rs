@@ -79,12 +79,7 @@ fn handle(mut stream: TcpStream) -> std::io::Result<()> {
         );
     }
     if path == HEALTH_PATH {
-        return respond(
-            &mut stream,
-            200,
-            "application/json",
-            HEALTH_BODY.as_bytes(),
-        );
+        return respond(&mut stream, 200, "application/json", HEALTH_BODY.as_bytes());
     }
     match static_file(path) {
         Some(file) => {
