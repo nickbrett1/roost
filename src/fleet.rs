@@ -774,4 +774,50 @@ mod tests {
             HubEvent::Activity { .. }
         ));
     }
+
+    /// The browser reads these field names by hand, so the wire to `/events` is
+    /// pinned rather than left to a rename that compiles fine on both sides and
+    /// silently breaks the view. `agent_id` in particular: the drill-down
+    /// matches a live event to the selected agent on it, and a `rename_all` on
+    /// the enum would move it out from under that comparison without any test
+    /// noticing.
+    #[test]
+    fn the_browser_event_shape_is_pinned() {
+        let event = HubEvent::Activity {
+            agent_id: "a2a-goose-dev".to_string(),
+            boot_id: "boot-a".to_string(),
+            entry: ActivityEntry {
+                seq: 7,
+                event_type: "tool_call".to_string(),
+                at: Some("2026-09-22T10:00:00Z".to_string()),
+                received_at_ms: 10,
+                context_id: Some("ctx-1".to_string()),
+                session_id: None,
+                skill: Some("ask".to_string()),
+                event: json!({ "type": "tool_call", "id": "call_1", "title": "shell · ls" }),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            json!({
+                "type": "activity",
+                "agent_id": "a2a-goose-dev",
+                "boot_id": "boot-a",
+                "entry": {
+                    "seq": 7,
+                    "eventType": "tool_call",
+                    "at": "2026-09-22T10:00:00Z",
+                    "receivedAtMs": 10,
+                    "contextId": "ctx-1",
+                    "sessionId": null,
+                    "skill": "ask",
+                    "event": { "type": "tool_call", "id": "call_1", "title": "shell · ls" },
+                },
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(HubEvent::Fleet { agents: vec![] }).unwrap(),
+            json!({ "type": "fleet", "agents": [] })
+        );
+    }
 }

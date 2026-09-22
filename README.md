@@ -96,7 +96,16 @@ authentication** here on the hub: `/agent/ws` requires a per-agent `Bearer` toke
 when `ROOST_AGENT_TOKENS` is set.
 
 Still to come: `history.*` answered by the real agent over goose's `sessions.db`
-(M2b), the live turn view beside History, and commands (M4).
+(M2b), and commands (M4).
+
+The live turn view is in: a drill-down opens on the agent's activity ring
+(`/api/agents/{id}/activity`) and then follows the `/events` fan-out, so it is
+populated on arrival rather than waiting for the agent to happen to speak. The
+wire is deliberately high-frequency — a turn is thousands of single-token
+`thought` and `answer` frames — so the view folds them: consecutive deltas in one
+context join into one line, a `tool_call` and its later updates are one row, and
+any other frame ends the current run. The hub stays a router: coalescing is the
+view's job and the hub holds no more than its bounded ring.
 
 ## Capabilities
 
