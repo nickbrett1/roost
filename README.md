@@ -56,7 +56,7 @@ cargo run --bin fake_agent -- --scenario stuck --id a2a-goose-nas
 
 Then open <http://127.0.0.1:3000/>. Configuration is environment-driven:
 `PORT`, `ROOST_STATIC_DIR`, `ROOST_STUCK_AFTER_MS`, `ROOST_STATUS_POLL_MS`,
-`ROOST_RING_SIZE`. The fake agent reads `ROOST_HUB_URL`.
+`ROOST_RING_SIZE`, `ROOST_TUNNEL_IDLE_MS`. The fake agent reads `ROOST_HUB_URL`.
 
 `ROOST_AGENT_TOKENS` gates the agent tunnel (§7.1). It is a comma-separated map
 of `agentId=token`, e.g.:
@@ -95,8 +95,20 @@ publish the activity feed, answer `status.get` / `sessions.list`), and **agent
 authentication** here on the hub: `/agent/ws` requires a per-agent `Bearer` token
 when `ROOST_AGENT_TOKENS` is set.
 
-Still to come: `history.*` answered by the real agent over goose's `sessions.db`
-(M2b), and commands (M4).
+M2b — the real agent answers `history.*` from goose's `sessions.db` on its own
+host (`a2a-goose` side); the hub's proxy routes were already in place.
+
+Still to come: commands (M4).
+
+A tunnel is only trusted while it is **carrying traffic**. TCP can die without a
+FIN, and a half-open socket parks `read()` forever — an agent that vanished would
+otherwise read as `connected` until its process exited, which is the exact
+failure mission control exists to surface. The hub already asks every agent for
+`status.get` on a cadence (`ROOST_STATUS_POLL_MS`, default 15s), so a live agent
+answers within one interval; after three of them with nothing inbound the hub
+drops the socket and marks the agent offline (`ROOST_TUNNEL_IDLE_MS` pins the
+deadline; it defaults to 3× the poll interval). Closing the socket is what pushes
+the agent to reconnect.
 
 The live turn view is in: a drill-down opens on the agent's activity ring
 (`/api/agents/{id}/activity`) and then follows the `/events` fan-out, so it is

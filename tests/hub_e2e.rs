@@ -414,6 +414,78 @@ fn spawn_agent(test: &TestHub, agent: FakeAgent) -> tokio::task::JoinHandle<()> 
     })
 }
 
+/// Dial `/agent/ws`, send a `hello`, then go silent: never read, never answer.
+/// This is a half-open tunnel from the hub's side — the socket is open but no
+/// traffic ever crosses it again. Returns the live socket so the test can keep
+/// it open (dropping it would send a FIN and change what is being tested).
+async fn dial_and_go_silent(addr: SocketAddr, agent_id: &str) -> tokio::task::JoinHandle<()> {
+    let hello = json!({
+        "type": "hello",
+        "agentId": agent_id,
+        "host": "dev-container-3",
+        "kind": "devcontainer",
+        "agentVersion": "0.9.1",
+        "protocolVersion": 1,
+        "bootId": "boot-silent",
+        "skills": ["ask"],
+        "capabilities": ["activity"],
+    });
+    tokio::spawn(async move {
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/agent/ws"))
+            .await
+            .expect("connect");
+        use futures_util::SinkExt;
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                hello.to_string().into(),
+            ))
+            .await
+            .expect("hello");
+        // Hold the socket open and ignore everything the hub sends. `read()`
+        // never returns, so nothing is ever answered.
+        std::future::pending::<()>().await;
+        drop(socket);
+    })
+}
+
+#[tokio::test]
+async fn a_silent_tunnel_is_dropped_and_the_agent_marked_offline() {
+    // A short idle deadline keeps the test quick; the poll keeps firing so a
+    // live agent would have answered and stayed connected.
+    let test = start_hub(Config {
+        status_poll_ms: 50,
+        tunnel_idle_ms: Some(200),
+        ..Config::default()
+    })
+    .await;
+
+    let _silent = dial_and_go_silent(test.addr, "a2a-goose-dev").await;
+
+    // It registers first: the hello is the last thing that crosses the wire.
+    let hub = Arc::clone(&test.hub);
+    assert!(
+        wait_for(Duration::from_secs(5), || hub
+            .agent_view("a2a-goose-dev", 0)
+            .is_some_and(|view| view.connected))
+        .await,
+        "the silent agent should have registered"
+    );
+
+    // Then the hub notices the silence and marks it offline, with no FIN from
+    // the agent: the socket is open, it is simply not carrying anything.
+    let hub = Arc::clone(&test.hub);
+    assert!(
+        wait_for(Duration::from_secs(5), || hub
+            .agent_view("a2a-goose-dev", 0)
+            .is_some_and(|view| !view.connected))
+        .await,
+        "a tunnel that stops sending must be dropped and the agent marked offline"
+    );
+
+    let view = test.hub.agent_view("a2a-goose-dev", 0).expect("view");
+    assert_eq!(view.state, AgentStateName::Offline);
+}
+
 #[tokio::test]
 async fn an_anonymous_dial_is_refused_when_auth_is_on() {
     let test = start_hub(Config {
