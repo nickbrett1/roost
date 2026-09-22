@@ -1,10 +1,12 @@
 <script>
 	import { onMount } from "svelte";
 	import {
+		fetchAgentActivity,
 		fetchFleet,
 		fetchHistoryMessages,
 		fetchHistorySessions,
 		fleetSummary,
+		foldActivity,
 		openEventStream,
 		relativeAge,
 		searchHistory,
@@ -24,6 +26,29 @@
 	let matches = $state(null);
 	let transcript = $state(null);
 
+	// The live turn view (memo §6.3). Activity does not come from history: the
+	// hub already holds the frames it was pushed, so this opens populated and
+	// then follows the fan-out. It is stored raw and folded at render time,
+	// which keeps the wire shape and the presentation from drifting apart.
+	let activityEntries = $state([]);
+	let activityError = $state(null);
+	let activity = $derived(foldActivity(activityEntries));
+
+	// The hub's ring is bounded (512); mirror that bound so a long-lived view
+	// holds no more than the hub would have sent it anyway.
+	const ACTIVITY_CAP = 512;
+
+	function label(line) {
+		if (line.type === "thought") return "think";
+		if (line.type === "answer") return "say";
+		if (line.type === "tool_call" || line.type === "tool_call_update") return "tool";
+		return line.type.replaceAll("_", " ");
+	}
+
+	function clock(at) {
+		return at ? at.slice(11, 19) : "";
+	}
+
 	async function load() {
 		try {
 			agents = await fetchFleet();
@@ -40,7 +65,31 @@
 		transcript = null;
 		historyError = null;
 		sessions = null;
-		if (selected) loadSessions(selected);
+		activityEntries = [];
+		activityError = null;
+		if (selected) {
+			loadSessions(selected);
+			loadActivity(selected);
+		}
+	}
+
+	async function loadActivity(agentId) {
+		try {
+			activityEntries = await fetchAgentActivity(agentId);
+			activityError = null;
+		} catch (cause) {
+			activityError = cause.message;
+			activityEntries = [];
+		}
+	}
+
+	function pushActivity(agentId, entry) {
+		// Only the open drill-down is tracked: the fleet table already carries
+		// every agent's liveness, and keeping a ring per agent would be the
+		// storage the memo says the hub is not (§5.6).
+		if (agentId !== selected) return;
+		const next = activityEntries.concat([entry]);
+		activityEntries = next.length > ACTIVITY_CAP ? next.slice(-ACTIVITY_CAP) : next;
 	}
 
 	async function loadSessions(agentId) {
@@ -87,8 +136,9 @@
 				if (event.type === "fleet") {
 					agents = event.agents;
 				} else if (event.type === "activity") {
+					pushActivity(event.agent_id, event.entry);
 					agents = agents.map((agent) =>
-						agent.agentId === event.agentId
+						agent.agentId === event.agent_id
 							? { ...agent, lastEventAtMs: Date.now(), eventCount: agent.eventCount + 1 }
 							: agent
 					);
@@ -110,6 +160,9 @@
 	});
 
 	const summary = $derived(fleetSummary(agents));
+	const selectedAgent = $derived(
+		agents.find((agent) => agent.agentId === selected) ?? null
+	);
 </script>
 
 <main>
@@ -165,10 +218,42 @@
 		<section class="drilldown">
 			<h2>
 				{selected}
-				<span class="muted">· history</span>
+				<span class="muted">· {selectedAgent ? stateLabel(selectedAgent.state) : ""}</span>
 			</h2>
 
-			<div class="searchbar">
+			<div class="columns">
+				<div class="live">
+					<h3>
+						live
+						{#if selectedAgent && selectedAgent.stuck}
+							<span class="warn">stuck</span>
+						{:else if selectedAgent && selectedAgent.inFlight > 0}
+							<span class="busy">in flight</span>
+						{/if}
+					</h3>
+					{#if activityError}
+						<p class="error">activity unavailable: {activityError}</p>
+					{:else if activity.length === 0}
+						<p class="muted">nothing published yet</p>
+					{:else}
+						<ol class="feed">
+							{#each activity as line, i (i)}
+								<li class={line.type}>
+									<span class="at">{clock(line.at)}</span>
+									<span class="kind">{label(line)}</span>
+									{#if line.status}
+										<span class="status" class:done={line.status === "completed"}>{line.status}</span>
+									{/if}
+									<span class="text">{line.text}</span>
+								</li>
+							{/each}
+						</ol>
+					{/if}
+				</div>
+
+				<div class="history">
+					<h3>history</h3>
+					<div class="searchbar">
 				<input
 					type="search"
 					bind:value={search}
@@ -234,6 +319,8 @@
 					<p class="muted">more messages available</p>
 				{/if}
 			{/if}
+				</div>
+			</div>
 		</section>
 	{/if}
 </main>
@@ -356,5 +443,76 @@
 	.role {
 		color: #777;
 		margin-right: 0.5rem;
+	}
+	.columns {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+		gap: 1.5rem;
+		align-items: start;
+	}
+	@media (max-width: 46rem) {
+		.columns {
+			grid-template-columns: minmax(0, 1fr);
+		}
+	}
+	.busy {
+		color: #6cf;
+	}
+	.feed {
+		list-style: none;
+		margin: 0;
+		padding: 0;
+		max-height: 24rem;
+		overflow-y: auto;
+		border: 1px solid #222;
+	}
+	.feed li {
+		display: flex;
+		gap: 0.4rem;
+		padding: 0.15rem 0.4rem;
+		border-bottom: 1px solid #181818;
+		font-size: 0.8rem;
+	}
+	.feed li:last-child {
+		border-bottom: none;
+	}
+	.feed .at {
+		color: #555;
+		flex: 0 0 4.5rem;
+	}
+	.feed .kind {
+		color: #777;
+		text-transform: uppercase;
+		font-size: 0.7rem;
+		flex: 0 0 3.5rem;
+	}
+	.feed .status {
+		flex: 0 0 4.5rem;
+	}
+	.feed .text {
+		flex: 1 1 auto;
+		min-width: 0;
+	}
+	.feed li.tool_call .text,
+	.feed li.tool_call_update .text {
+		color: #6cf;
+	}
+	.feed li.answer .text {
+		color: #ded;
+	}
+	.feed li.failed,
+	.feed li.failed .text {
+		color: #a33;
+	}
+	.status {
+		color: #c80;
+		font-size: 0.7rem;
+	}
+	.status.done {
+		color: #3a3;
+	}
+	.text {
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
 	}
 </style>

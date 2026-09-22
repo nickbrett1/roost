@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+	describeEvent,
+	fetchAgentActivity,
 	fetchFleet,
 	fetchHistoryMessages,
 	fetchHistorySessions,
 	fleetSummary,
+	foldActivity,
 	openEventStream,
 	relativeAge,
 	searchHistory,
@@ -183,5 +186,128 @@ describe("history helpers", () => {
 	it("raises on a failed response", async () => {
 		const fetchImpl = async () => ({ ok: false, status: 503 });
 		await expect(fetchHistorySessions("a", {}, fetchImpl)).rejects.toThrow("503");
+	});
+});
+
+describe("fetchAgentActivity", () => {
+	it("returns the events array from the hub's ring", async () => {
+		const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => ({ events: [{ seq: 1 }] }) }));
+		await expect(fetchAgentActivity("a b", fetchImpl)).resolves.toEqual([{ seq: 1 }]);
+		// The id is encoded: agent ids are host-shaped, not URL-safe by contract.
+		expect(fetchImpl).toHaveBeenCalledWith("/api/agents/a%20b/activity");
+	});
+
+	it("returns an empty array when the agent has published nothing", async () => {
+		const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => ({ agentId: "a" }) }));
+		await expect(fetchAgentActivity("a", fetchImpl)).resolves.toEqual([]);
+	});
+
+	it("throws when the hub does not know the agent, so the view can say so", async () => {
+		const fetchImpl = vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) }));
+		await expect(fetchAgentActivity("ghost", fetchImpl)).rejects.toThrow("request failed: 404");
+	});
+});
+
+describe("describeEvent", () => {
+	it("prefers a text field when the event carries one", () => {
+		expect(describeEvent({ type: "plan", text: "do the thing" })).toBe("do the thing");
+	});
+
+	it("falls back to the remaining fields, so an unknown type still says something", () => {
+		expect(describeEvent({ type: "usage", total: 42 })).toBe("total=42");
+	});
+
+	it("names a bare event rather than rendering it empty", () => {
+		expect(describeEvent({ type: "finished" })).toBe("finished");
+		expect(describeEvent(undefined)).toBe("event");
+	});
+});
+
+describe("foldActivity", () => {
+	const entry = (seq, eventType, event, extra = {}) => ({
+		seq,
+		eventType,
+		at: `2026-09-22T10:00:${String(seq).padStart(2, "0")}Z`,
+		contextId: "ctx-1",
+		event,
+		...extra
+	});
+
+	it("coalesces a streamed thought into a single line", () => {
+		const lines = foldActivity([
+			entry(1, "thought", { type: "thought", text: "Hel" }),
+			entry(2, "thought", { type: "thought", text: "lo " }),
+			entry(3, "thought", { type: "thought", text: "world" })
+		]);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toMatchObject({ type: "thought", text: "Hello world" });
+	});
+
+	it("does not merge one context's thought into another's", () => {
+		const lines = foldActivity([
+			entry(1, "thought", { type: "thought", text: "a" }),
+			entry(2, "thought", { type: "thought", text: "b" }, { contextId: "ctx-2" })
+		]);
+		expect(lines).toHaveLength(2);
+		expect(lines.map((line) => line.text)).toEqual(["a", "b"]);
+	});
+
+	it("does not merge an answer into a preceding thought", () => {
+		const lines = foldActivity([
+			entry(1, "thought", { type: "thought", text: "thinking" }),
+			entry(2, "answer", { type: "answer", text: "answer" })
+		]);
+		expect(lines.map((line) => line.type)).toEqual(["thought", "answer"]);
+	});
+
+	it("keeps a thought that resumes after a tool call as a fresh line", () => {
+		const lines = foldActivity([
+			entry(1, "thought", { type: "thought", text: "before" }),
+			entry(2, "tool_call", { type: "tool_call", id: "c1", title: "shell · ls" }),
+			entry(3, "thought", { type: "thought", text: "after" })
+		]);
+		expect(lines.map((line) => line.type)).toEqual(["thought", "tool_call", "thought"]);
+		expect(lines[0].text).toBe("before");
+		expect(lines[2].text).toBe("after");
+	});
+
+	it("folds a tool call and its updates into one row", () => {
+		const lines = foldActivity([
+			entry(1, "tool_call", { type: "tool_call", id: "c1", title: "shell · ls" }),
+			entry(2, "tool_call_update", { type: "tool_call_update", id: "c1", status: "in_progress" }),
+			entry(3, "tool_call_update", { type: "tool_call_update", id: "c1", status: "completed" })
+		]);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toMatchObject({ id: "c1", text: "shell · ls", status: "completed" });
+	});
+
+	it("shows an update whose call has aged out of the ring", () => {
+		const lines = foldActivity([
+			entry(1, "tool_call_update", { type: "tool_call_update", id: "gone", status: "completed" })
+		]);
+		expect(lines).toHaveLength(1);
+		expect(lines[0].status).toBe("completed");
+	});
+
+	it("keeps an unknown frame type instead of dropping it (version skew is normal)", () => {
+		const lines = foldActivity([entry(1, "quantum_entangled", { type: "quantum_entangled", x: 1 })]);
+		expect(lines).toHaveLength(1);
+		expect(lines[0].type).toBe("quantum_entangled");
+	});
+
+	it("keeps only the most recent lines", () => {
+		const many = Array.from({ length: 10 }, (_, i) => entry(i + 1, "tool_call", { type: "tool_call", id: `c${i}`, title: "t" }));
+		const lines = foldActivity(many, { limit: 3 });
+		expect(lines).toHaveLength(3);
+		expect(lines.map((line) => line.id)).toEqual(["c7", "c8", "c9"]);
+	});
+
+	it("carries no internal bookkeeping into the render", () => {
+		const lines = foldActivity([entry(1, "thought", { type: "thought", text: "x" })]);
+		expect(lines[0]).not.toHaveProperty("open");
+	});
+
+	it("survives an empty ring", () => {
+		expect(foldActivity([])).toEqual([]);
 	});
 });

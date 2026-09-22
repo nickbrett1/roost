@@ -154,3 +154,122 @@ export async function fetchHistoryMessages(
 	const inner = body.body ?? {};
 	return { messages: inner.messages ?? [], nextCursor: inner.nextCursor ?? null };
 }
+
+/**
+ * An agent's recent activity ring (memo §5.3). Unlike `history.*`, this does not
+ * cross the tunnel: the hub already holds the last few hundred frames it was
+ * pushed, so the drill-down opens with a populated view instead of an empty one
+ * that fills in as the agent happens to speak.
+ *
+ * @param {string} agentId
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<Array<object>>} raw activity entries, oldest first
+ */
+export async function fetchAgentActivity(agentId, fetchImpl = globalThis.fetch) {
+	const body = await getJson(
+		fetchImpl,
+		`/api/agents/${encodeURIComponent(agentId)}/activity`
+	);
+	return Array.isArray(body.events) ? body.events : [];
+}
+
+/**
+ * A one-line gist of an event the view has no special rendering for. Unknown
+ * types are shown, not dropped: version skew is normal (memo §3.4), and an
+ * operator is better served by seeing a frame they do not recognise than by the
+ * view silently agreeing with itself.
+ *
+ * @param {object} event
+ * @returns {string}
+ */
+export function describeEvent(event) {
+	if (typeof event?.text === "string") return event.text;
+	const { type, ...rest } = event ?? {};
+	const detail = Object.entries(rest)
+		.map(([key, value]) => `${key}=${value !== null && typeof value === "object" ? JSON.stringify(value) : value}`)
+		.join(" ");
+	return detail || (type ?? "event");
+}
+
+/**
+ * Fold the hub's raw activity ring into renderable lines.
+ *
+ * The wire is deliberately high-frequency and the hub invents no schema for it:
+ * thoughts and answers arrive one token at a time, so a single turn is thousands
+ * of entries and the hub's ring is deliberately bounded. Coalescing therefore
+ * belongs to the view. Three rules do the work:
+ *
+ *   - consecutive `thought` / `answer` deltas in the same context join into one
+ *     line, because they are one utterance that happened to be chopped up;
+ *   - a `tool_call` and its later `tool_call_update`s are one row, matched by id;
+ *   - any other frame ends the current text run, so a thought that resumes after
+ *     a tool call starts a fresh line rather than reading as one breath.
+ *
+ * @param {Array<object>} entries raw entries, oldest first
+ * @param {{ limit?: number }} [options] how many trailing lines to keep
+ * @returns {Array<object>} folded lines, oldest first
+ */
+export function foldActivity(entries, { limit = 120 } = {}) {
+	const lines = [];
+	const tools = new Map();
+	for (const entry of entries) {
+		const event = entry?.event ?? {};
+		const type = entry?.eventType ?? event.type ?? "unknown";
+		const at = entry?.at ?? null;
+		const closes = () => {
+			const last = lines[lines.length - 1];
+			if (last) last.open = false;
+		};
+		if (type === "thought" || type === "answer") {
+			const last = lines[lines.length - 1];
+			if (last && last.type === type && last.open && last.contextId === (entry.contextId ?? null)) {
+				last.text += event.text ?? "";
+				last.at = at ?? last.at;
+				continue;
+			}
+			closes();
+			lines.push({
+				type,
+				contextId: entry.contextId ?? null,
+				text: event.text ?? "",
+				at,
+				open: true
+			});
+			continue;
+		}
+		closes();
+		if (type === "tool_call") {
+			const line = {
+				type,
+				id: event.id ?? null,
+				text: event.title ?? "",
+				status: event.status ?? "pending",
+				at
+			};
+			if (line.id !== null) tools.set(line.id, line);
+			lines.push(line);
+		} else if (type === "tool_call_update") {
+			const existing = event.id !== undefined && event.id !== null ? tools.get(event.id) : undefined;
+			if (existing) {
+				existing.status = event.status ?? existing.status;
+				if (event.title) existing.text = event.title;
+				existing.at = at ?? existing.at;
+			} else {
+				// An update for a call the ring no longer holds (it aged out, or
+				// this is a reconnect): show it rather than dropping it.
+				lines.push({
+					type,
+					id: event.id ?? null,
+					text: event.title ?? "",
+					status: event.status ?? "unknown",
+					at
+				});
+			}
+		} else {
+			lines.push({ type, id: null, text: describeEvent(event), at, status: null });
+		}
+	}
+	const kept = lines.slice(-limit);
+	for (const line of kept) delete line.open;
+	return kept;
+}
