@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::time::Duration;
 
 /// Default port the hub binds inside its container (the compose file publishes
 /// it host-side).
@@ -20,6 +21,16 @@ pub struct Config {
     pub stuck_after_ms: u64,
     /// How often the hub asks a connected agent for `status.get`.
     pub status_poll_ms: u64,
+    /// How long an agent's tunnel may be **silent** before the hub drops it and
+    /// marks it offline. `None` derives it from `status_poll_ms` (see
+    /// [`Config::tunnel_idle`]); `Some(ms)` pins it via `ROOST_TUNNEL_IDLE_MS`.
+    ///
+    /// A TCP connection can die without either end noticing — a half-open
+    /// socket leaves `read()` parked forever, so an agent that has silently
+    /// vanished would otherwise stay "connected" until the process exits. With
+    /// no heartbeat on the wire (§5), inbound silence is the only signal the
+    /// hub has, and dropping the socket is what forces the agent to reconnect.
+    pub tunnel_idle_ms: Option<u64>,
     /// How long a `request` waits for its `response` before giving up.
     pub request_timeout_ms: u64,
     /// Per-agent credentials, keyed by `agentId`. Empty means authentication is
@@ -36,6 +47,7 @@ impl Default for Config {
             ring_size: 512,
             stuck_after_ms: 120_000,
             status_poll_ms: 15_000,
+            tunnel_idle_ms: None,
             request_timeout_ms: 10_000,
             agent_tokens: HashMap::new(),
         }
@@ -63,6 +75,9 @@ impl Config {
         if let Some(ms) = read_u64("ROOST_STATUS_POLL_MS") {
             config.status_poll_ms = ms;
         }
+        if let Some(ms) = read_u64("ROOST_TUNNEL_IDLE_MS") {
+            config.tunnel_idle_ms = Some(ms);
+        }
         if let Some(ms) = read_u64("ROOST_REQUEST_TIMEOUT_MS") {
             config.request_timeout_ms = ms;
         }
@@ -78,6 +93,18 @@ impl Config {
         !self.agent_tokens.is_empty()
     }
 
+    /// How long an agent's tunnel may be silent before the hub drops it.
+    ///
+    /// Derived by default as three `status_poll_ms` intervals: the hub asks
+    /// every connected agent for `status.get` on that cadence, so an agent that
+    /// is alive answers within one interval. Missing three in a row means the
+    /// tunnel is not carrying traffic, whatever the socket claims.
+    pub fn tunnel_idle(&self) -> Duration {
+        let ms = self
+            .tunnel_idle_ms
+            .unwrap_or_else(|| self.status_poll_ms.saturating_mul(3));
+        Duration::from_millis(ms.max(1))
+    }
     /// Whether `presented` authenticates `agent_id`.
     ///
     /// When authentication is off this is always `true` — an operator who
@@ -153,6 +180,36 @@ mod tests {
         assert_eq!(config.port, 3000);
         assert_eq!(config.static_dir, "web/dist");
         assert_eq!(config.stuck_after_ms, 120_000);
+    }
+
+    #[test]
+    fn the_idle_deadline_is_three_polls_by_default_and_pinnable() {
+        let config = Config::default();
+        // 15s poll -> 45s of silence tolerated, matching the design note.
+        assert_eq!(config.tunnel_idle(), Duration::from_secs(45));
+
+        // A pinned value wins outright.
+        let pinned = Config {
+            tunnel_idle_ms: Some(500),
+            ..Config::default()
+        };
+        assert_eq!(pinned.tunnel_idle(), Duration::from_millis(500));
+
+        // With no pin, the deadline tracks the poll interval — a hub that polls
+        // rarely must not drop an agent faster than it asks.
+        let slow = Config {
+            status_poll_ms: 1_000,
+            ..Config::default()
+        };
+        assert_eq!(slow.tunnel_idle(), Duration::from_secs(3));
+
+        // Never zero: a deadline that has already expired would drop every
+        // tunnel the instant it registered.
+        let degenerate = Config {
+            status_poll_ms: 0,
+            ..Config::default()
+        };
+        assert_eq!(degenerate.tunnel_idle(), Duration::from_millis(1));
     }
 
     #[test]

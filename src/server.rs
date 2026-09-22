@@ -276,10 +276,26 @@ async fn handle_agent(socket: WebSocket, hub: Arc<Hub>, presented: Option<String
 
     let poller = spawn_status_poll(Arc::clone(&hub), agent_id.clone());
 
-    while let Some(message) = stream.next().await {
-        let message = match message {
-            Ok(message) => message,
-            Err(_) => break,
+    // A tunnel that goes silent is dropped, not trusted forever. TCP can die
+    // without a FIN — a half-open socket parks `read()` indefinitely — so
+    // inbound silence is the hub's only liveness signal (§5 defines no
+    // heartbeat). The poller above guarantees an alive agent answers within one
+    // `status_poll_ms`; `tunnel_idle` is three of those, so a genuinely live
+    // agent is never dropped, while a vanished one is marked offline and, by
+    // closing the socket, pushed to reconnect.
+    let idle = hub.config().tunnel_idle();
+
+    loop {
+        let message = match tokio::time::timeout(idle, stream.next()).await {
+            Ok(Some(Ok(message))) => message,
+            Ok(Some(Err(_))) | Ok(None) => break,
+            Err(_) => {
+                eprintln!(
+                    "agent {agent_id} silent for {}s; dropping the tunnel",
+                    idle.as_secs()
+                );
+                break;
+            }
         };
         match message {
             Message::Text(text) => {
