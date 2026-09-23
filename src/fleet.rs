@@ -14,7 +14,10 @@ use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::config::Config;
-use crate::protocol::{ActivityFrame, Hello, RequestFrame, ResponseFrame};
+use crate::protocol::{ActivityFrame, CommandFrame, Hello, RequestFrame, ResponseFrame};
+
+/// The `hello` capability that makes an agent commandable (§5.2, §5.5).
+pub const REBOOT_CAPABILITY: &str = "reboot";
 
 /// Wall-clock milliseconds since the Unix epoch. All ages are computed in this
 /// unit so tests can pass a synthetic "now" instead of sleeping.
@@ -61,7 +64,85 @@ pub enum RecordOutcome {
 pub enum AgentStateName {
     Live,
     Stuck,
+    /// The hub commanded a reboot and the agent is inside the reconnect window
+    /// (§5.5). Distinct from `Offline`: a restart we asked for is not a crash.
+    Rebooting,
     Offline,
+}
+
+/// A reboot the hub commanded, kept so a restart it asked for renders as
+/// "rebooting" rather than "crashed" (§5.5, §6.3). This is a record of the
+/// hub's *own* action, not of the agent's data (§5.6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandedReboot {
+    pub at_ms: u64,
+    /// Past this, the absence is a crash again — the record has expired.
+    pub deadline_ms: u64,
+    pub would_install: Option<String>,
+}
+
+/// The answer to a `reboot`/`preflight` (§5.5): what the agent *would* install,
+/// whether a supervisor would bring it back, and how many turns are in flight.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebootPreflight {
+    pub would_install: Option<String>,
+    pub supervised: bool,
+    pub in_flight: u32,
+}
+
+/// The answer to a `reboot` command that was actually sent (§5.5).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebootAck {
+    pub would_install: Option<String>,
+    pub in_flight: u32,
+    pub restarting: bool,
+}
+
+/// Why a reboot was refused. Each maps to a distinct HTTP status *and* a
+/// machine-readable `error` string in the body, so the UI can say why rather
+/// than offering a control that silently fails (§5.7, §6.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebootErrorKind {
+    /// The agent does not advertise the `reboot` capability.
+    Unsupported,
+    /// No tunnel, or the agent is not connected.
+    Unreachable,
+    /// `preflight` reports no supervisor: a reboot would be a silent fleet loss.
+    Unsupervised,
+    /// Turns are in flight and the command was not forced (§5.5 rule 3).
+    InFlight,
+    /// The agent answered the command with an error, or did not answer in time.
+    Agent,
+}
+
+impl RebootErrorKind {
+    /// The machine-readable `error` string carried in the response body.
+    pub fn code(self) -> &'static str {
+        match self {
+            RebootErrorKind::Unsupported => "reboot_unsupported",
+            RebootErrorKind::Unreachable => "agent_unreachable",
+            RebootErrorKind::Unsupervised => "reboot_unsupervised",
+            RebootErrorKind::InFlight => "turns_in_flight",
+            RebootErrorKind::Agent => "agent_error",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RebootError {
+    pub kind: RebootErrorKind,
+    pub message: String,
+}
+
+impl RebootError {
+    fn new(kind: RebootErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
 }
 
 /// A recent activity event, held in the agent's bounded ring.
@@ -129,6 +210,11 @@ pub struct AgentView {
     pub connected_at_ms: u64,
     pub seconds_since_event: Option<u64>,
     pub event_count: u64,
+    /// True while a commanded reboot is inside its reconnect window (§5.5).
+    pub rebooting: bool,
+    /// The version a commanded reboot would install, when one is recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub would_install: Option<String>,
 }
 
 /// An event fanned out to browser subscribers.
@@ -156,6 +242,8 @@ struct Agent {
     status: AgentStatus,
     outbound: Option<mpsc::UnboundedSender<Outbound>>,
     pending: PendingMap,
+    /// The last reboot the hub commanded, if any (§5.5).
+    commanded_reboot: Option<CommandedReboot>,
 }
 
 /// The hub. Cheap to clone behind an `Arc`; shared by every connection.
@@ -214,6 +302,9 @@ impl Hub {
                     agent.last_frame_at_ms = now;
                     agent.outbound = Some(outbound);
                     agent.pending = pending;
+                    // It came back: a commanded reboot is over, and a later
+                    // absence is a fresh question, not this one continuing.
+                    agent.commanded_reboot = None;
                 }
                 None => {
                     agents.insert(
@@ -230,6 +321,7 @@ impl Hub {
                             status: AgentStatus::default(),
                             outbound: Some(outbound),
                             pending,
+                            commanded_reboot: None,
                         },
                     );
                 }
@@ -347,6 +439,58 @@ impl Hub {
         })
     }
 
+    /// Send one outbound frame and await the `response` carrying its id.
+    ///
+    /// Both `request` and `command` are the same round trip on the wire (§5.4,
+    /// §5.5): correlate by id, wait up to `request_timeout_ms`, and surface the
+    /// agent's own error rather than inventing one.
+    async fn send_await(
+        &self,
+        handle: &AgentHandle,
+        id: String,
+        text: String,
+        what: &str,
+    ) -> anyhow::Result<Value> {
+        let (tx, rx) = oneshot::channel();
+        handle
+            .pending
+            .lock()
+            .expect("pending map poisoned")
+            .insert(id.clone(), tx);
+        if handle.outbound.send(Outbound::Text(text)).is_err() {
+            handle
+                .pending
+                .lock()
+                .expect("pending map poisoned")
+                .remove(&id);
+            anyhow::bail!("agent {} tunnel is closed", handle.agent_id);
+        }
+        match tokio::time::timeout(Duration::from_millis(self.config.request_timeout_ms), rx).await
+        {
+            Ok(Ok(response)) => {
+                if response.ok {
+                    Ok(response.body.unwrap_or(Value::Null))
+                } else {
+                    Err(anyhow::anyhow!(
+                        "{what} failed: {}",
+                        response
+                            .error
+                            .unwrap_or_else(|| "unknown error".to_string())
+                    ))
+                }
+            }
+            Ok(Err(_)) => Err(anyhow::anyhow!("{what}: response channel dropped")),
+            Err(_) => {
+                handle
+                    .pending
+                    .lock()
+                    .expect("pending map poisoned")
+                    .remove(&id);
+                Err(anyhow::anyhow!("{what}: timed out"))
+            }
+        }
+    }
+
     /// Issue a `request` and await its `response` (§5.4).
     pub async fn request(
         &self,
@@ -358,53 +502,126 @@ impl Hub {
             .handle(agent_id)
             .ok_or_else(|| anyhow::anyhow!("agent {agent_id} is not connected"))?;
         let id = format!("r-{}", self.next_request_id.fetch_add(1, Ordering::Relaxed));
-        let (tx, rx) = oneshot::channel();
-        handle
-            .pending
-            .lock()
-            .expect("pending map poisoned")
-            .insert(id.clone(), tx);
         let frame = RequestFrame {
             id: id.clone(),
             method: method.to_string(),
             params,
         };
-        if handle
-            .outbound
-            .send(Outbound::Text(frame.to_value().to_string()))
-            .is_err()
-        {
-            handle
-                .pending
-                .lock()
-                .expect("pending map poisoned")
-                .remove(&id);
-            anyhow::bail!("agent {agent_id} tunnel is closed");
+        self.send_await(&handle, id, frame.to_value().to_string(), method)
+            .await
+    }
+
+    /// Issue a `command` and await its `response` (§5.5). Commands share the
+    /// correlation map and id space with requests; only the tag differs.
+    pub async fn command(
+        &self,
+        agent_id: &str,
+        action: &str,
+        mode: Option<&str>,
+        force: bool,
+    ) -> anyhow::Result<Value> {
+        let handle = self
+            .handle(agent_id)
+            .ok_or_else(|| anyhow::anyhow!("agent {agent_id} is not connected"))?;
+        let id = format!("c-{}", self.next_request_id.fetch_add(1, Ordering::Relaxed));
+        let frame = CommandFrame {
+            id: id.clone(),
+            action: action.to_string(),
+            mode: mode.map(str::to_string),
+            force,
+        };
+        self.send_await(&handle, id, frame.to_value().to_string(), action)
+            .await
+    }
+
+    /// Whether an agent can be commanded to reboot at all (§5.7). A capability
+    /// the agent does not advertise is a rendered state, not a failed call.
+    fn ensure_rebootable(&self, agent_id: &str) -> Result<(), RebootError> {
+        let agents = self.agents.read().expect("fleet lock poisoned");
+        let Some(agent) = agents.get(agent_id) else {
+            return Err(RebootError::new(
+                RebootErrorKind::Unreachable,
+                format!("unknown agent {agent_id}"),
+            ));
+        };
+        if !agent.connected {
+            return Err(RebootError::new(
+                RebootErrorKind::Unreachable,
+                format!("agent {agent_id} is not connected"),
+            ));
         }
-        match tokio::time::timeout(Duration::from_millis(self.config.request_timeout_ms), rx).await
+        if !agent
+            .hello
+            .capabilities
+            .iter()
+            .any(|c| c == REBOOT_CAPABILITY)
         {
-            Ok(Ok(response)) => {
-                if response.ok {
-                    Ok(response.body.unwrap_or(Value::Null))
-                } else {
-                    Err(anyhow::anyhow!(
-                        "{method} failed: {}",
-                        response
-                            .error
-                            .unwrap_or_else(|| "unknown error".to_string())
-                    ))
-                }
-            }
-            Ok(Err(_)) => Err(anyhow::anyhow!("{method}: response channel dropped")),
-            Err(_) => {
-                handle
-                    .pending
-                    .lock()
-                    .expect("pending map poisoned")
-                    .remove(&id);
-                Err(anyhow::anyhow!("{method}: timed out"))
+            return Err(RebootError::new(
+                RebootErrorKind::Unsupported,
+                format!("agent {agent_id} does not advertise the {REBOOT_CAPABILITY} capability"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Ask an agent what a reboot would do, without doing it (§5.5 rule 1).
+    pub async fn reboot_preflight(&self, agent_id: &str) -> Result<RebootPreflight, RebootError> {
+        self.ensure_rebootable(agent_id)?;
+        let body = self
+            .command(agent_id, "reboot", Some("preflight"), false)
+            .await
+            .map_err(|error| RebootError::new(RebootErrorKind::Agent, error.to_string()))?;
+        Ok(preflight_from_body(&body))
+    }
+
+    /// Command a reboot, after the three rules of §5.5:
+    ///
+    /// 1. `preflight` first, so the version is known before anything irreversible;
+    /// 2. refuse if there is no supervisor (`supervised: false`), because a reboot
+    ///    the agent cannot come back from is a silent fleet loss;
+    /// 3. default-refuse when turns are in flight, unless `force`.
+    pub async fn reboot(&self, agent_id: &str, force: bool) -> Result<RebootAck, RebootError> {
+        let preflight = self.reboot_preflight(agent_id).await?;
+        if !preflight.supervised {
+            return Err(RebootError::new(
+                RebootErrorKind::Unsupervised,
+                format!("agent {agent_id} reports no supervisor: a reboot would not come back"),
+            ));
+        }
+        if preflight.in_flight > 0 && !force {
+            return Err(RebootError::new(
+                RebootErrorKind::InFlight,
+                format!(
+                    "agent {agent_id} has {} turn(s) in flight; force to reboot anyway",
+                    preflight.in_flight
+                ),
+            ));
+        }
+        let body = self
+            .command(agent_id, "reboot", Some("now"), force)
+            .await
+            .map_err(|error| RebootError::new(RebootErrorKind::Agent, error.to_string()))?;
+        let restarting = body
+            .get("restarting")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let now = now_ms();
+        {
+            let mut agents = self.agents.write().expect("fleet lock poisoned");
+            if let Some(agent) = agents.get_mut(agent_id) {
+                agent.commanded_reboot = Some(CommandedReboot {
+                    at_ms: now,
+                    deadline_ms: now.saturating_add(self.config.reboot_reconnect_ms),
+                    would_install: preflight.would_install.clone(),
+                });
             }
         }
+        self.broadcast_fleet(now);
+        Ok(RebootAck {
+            would_install: preflight.would_install,
+            in_flight: preflight.in_flight,
+            restarting,
+        })
     }
 
     /// A full fleet snapshot, sorted by agent id for stable output.
@@ -449,12 +666,31 @@ fn view(agent: &Agent, now: u64, config: &Config) -> AgentView {
         now,
         config.stuck_after_ms,
     );
+    // A commanded reboot is a known absence: offline *within* the reconnect
+    // window it asked for, and a crash only past it (§5.5, §6.3).
+    let rebooting = !agent.connected
+        && agent
+            .commanded_reboot
+            .as_ref()
+            .is_some_and(|reboot| now < reboot.deadline_ms);
     let state = if !agent.connected {
-        AgentStateName::Offline
+        if rebooting {
+            AgentStateName::Rebooting
+        } else {
+            AgentStateName::Offline
+        }
     } else if stuck {
         AgentStateName::Stuck
     } else {
         AgentStateName::Live
+    };
+    let would_install = if rebooting {
+        agent
+            .commanded_reboot
+            .as_ref()
+            .and_then(|reboot| reboot.would_install.clone())
+    } else {
+        None
     };
     AgentView {
         agent_id: agent.hello.agent_id.clone(),
@@ -479,6 +715,32 @@ fn view(agent: &Agent, now: u64, config: &Config) -> AgentView {
             .last_event_at_ms
             .map(|at| now.saturating_sub(at) / 1000),
         event_count: agent.event_count,
+        rebooting,
+        would_install,
+    }
+}
+
+/// Read a `reboot`/`preflight` body into a [`RebootPreflight`] (§5.5).
+///
+/// Tolerant like every other agent body: a missing or renamed field degrades to
+/// the *safe* answer, not an error. `supervised` defaults to **false** — an
+/// agent too old to answer must not be commanded to reboot on the assumption it
+/// will come back.
+fn preflight_from_body(body: &Value) -> RebootPreflight {
+    RebootPreflight {
+        would_install: body
+            .get("wouldInstall")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        supervised: body
+            .get("supervised")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        in_flight: body
+            .get("inFlight")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .min(u32::MAX as u64) as u32,
     }
 }
 
@@ -534,6 +796,38 @@ mod tests {
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         hub.register(hello(boot_id), tx, pending, now);
         Tunnel { rx }
+    }
+
+    fn hello_with(boot_id: &str, capabilities: &[&str]) -> Hello {
+        let mut hello = hello(boot_id);
+        hello.capabilities = capabilities.iter().map(|c| c.to_string()).collect();
+        hello
+    }
+
+    fn connect_with(hub: &Arc<Hub>, hello: Hello, now: u64) -> Tunnel {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        hub.register(hello, tx, pending, now);
+        Tunnel { rx }
+    }
+
+    async fn next_frame(tunnel: &mut Tunnel) -> Value {
+        let Outbound::Text(text) = tunnel.rx.recv().await.expect("a frame") else {
+            panic!("expected a text frame");
+        };
+        serde_json::from_str(&text).expect("a JSON frame")
+    }
+
+    fn answer_ok(hub: &Arc<Hub>, id: &str, body: Value) {
+        assert!(hub.deliver_response(
+            "a2a-goose-dev",
+            ResponseFrame {
+                id: id.to_string(),
+                ok: true,
+                body: Some(body),
+                error: None,
+            }
+        ));
     }
 
     fn activity(boot_id: &str, seq: u64) -> ActivityFrame {
@@ -760,6 +1054,166 @@ mod tests {
             .request("nobody", "status.get", json!({}))
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn command_is_answered_by_a_response() {
+        let hub = hub();
+        let mut tunnel = connect_with(&hub, hello_with("boot-a", &["activity", "reboot"]), 0);
+        let task = tokio::spawn({
+            let hub = Arc::clone(&hub);
+            async move {
+                hub.command("a2a-goose-dev", "reboot", Some("preflight"), false)
+                    .await
+            }
+        });
+        let frame = next_frame(&mut tunnel).await;
+        assert_eq!(frame["type"], "command");
+        assert_eq!(frame["action"], "reboot");
+        assert_eq!(frame["mode"], "preflight");
+        let id = frame["id"].as_str().unwrap().to_string();
+        assert!(id.starts_with("c-"), "commands use their own id space");
+        answer_ok(&hub, &id, json!({ "wouldInstall": "0.9.2" }));
+        assert_eq!(task.await.unwrap().unwrap()["wouldInstall"], "0.9.2");
+    }
+
+    #[tokio::test]
+    async fn reboot_is_refused_without_the_capability() {
+        // The default test hello advertises only `activity`.
+        let hub = hub();
+        connect(&hub, "boot-a", 0);
+        let error = hub.reboot_preflight("a2a-goose-dev").await.unwrap_err();
+        assert_eq!(error.kind, RebootErrorKind::Unsupported);
+    }
+
+    #[tokio::test]
+    async fn reboot_is_refused_when_unsupervised() {
+        let hub = hub();
+        let mut tunnel = connect_with(&hub, hello_with("boot-a", &["reboot"]), 0);
+        let task = tokio::spawn({
+            let hub = Arc::clone(&hub);
+            async move { hub.reboot("a2a-goose-dev", false).await }
+        });
+        let frame = next_frame(&mut tunnel).await;
+        let id = frame["id"].as_str().unwrap().to_string();
+        answer_ok(
+            &hub,
+            &id,
+            json!({ "wouldInstall": "0.9.2", "supervised": false, "inFlight": 0 }),
+        );
+        assert_eq!(
+            task.await.unwrap().unwrap_err().kind,
+            RebootErrorKind::Unsupervised
+        );
+    }
+
+    #[tokio::test]
+    async fn reboot_is_default_refused_in_flight_but_force_goes_through() {
+        let hub = hub();
+        let mut tunnel = connect_with(&hub, hello_with("boot-a", &["reboot"]), 0);
+
+        let refused = tokio::spawn({
+            let hub = Arc::clone(&hub);
+            async move { hub.reboot("a2a-goose-dev", false).await }
+        });
+        let frame = next_frame(&mut tunnel).await;
+        let id = frame["id"].as_str().unwrap().to_string();
+        answer_ok(
+            &hub,
+            &id,
+            json!({ "wouldInstall": "0.9.2", "supervised": true, "inFlight": 2 }),
+        );
+        assert_eq!(
+            refused.await.unwrap().unwrap_err().kind,
+            RebootErrorKind::InFlight
+        );
+
+        let forced = tokio::spawn({
+            let hub = Arc::clone(&hub);
+            async move { hub.reboot("a2a-goose-dev", true).await }
+        });
+        let frame = next_frame(&mut tunnel).await;
+        let id = frame["id"].as_str().unwrap().to_string();
+        answer_ok(
+            &hub,
+            &id,
+            json!({ "wouldInstall": "0.9.2", "supervised": true, "inFlight": 2 }),
+        );
+        let frame = next_frame(&mut tunnel).await;
+        assert_eq!(frame["mode"], "now");
+        assert_eq!(frame["force"], true);
+        let id = frame["id"].as_str().unwrap().to_string();
+        answer_ok(&hub, &id, json!({ "restarting": true }));
+        let ack = forced.await.unwrap().unwrap();
+        assert_eq!(ack.in_flight, 2);
+        assert!(ack.restarting);
+        assert_eq!(ack.would_install.as_deref(), Some("0.9.2"));
+    }
+
+    #[tokio::test]
+    async fn a_commanded_reboot_reads_as_rebooting_then_expires() {
+        let hub = hub();
+        let mut tunnel = connect_with(&hub, hello_with("boot-a", &["reboot"]), 0);
+        let task = tokio::spawn({
+            let hub = Arc::clone(&hub);
+            async move { hub.reboot("a2a-goose-dev", false).await }
+        });
+        let frame = next_frame(&mut tunnel).await;
+        let id = frame["id"].as_str().unwrap().to_string();
+        answer_ok(
+            &hub,
+            &id,
+            json!({ "wouldInstall": "0.9.2", "supervised": true, "inFlight": 0 }),
+        );
+        let frame = next_frame(&mut tunnel).await;
+        let id = frame["id"].as_str().unwrap().to_string();
+        answer_ok(&hub, &id, json!({ "restarting": true }));
+        task.await.unwrap().unwrap();
+
+        // The agent goes away to restart.
+        let now = now_ms();
+        hub.disconnect("a2a-goose-dev", "boot-a", now);
+        let view = hub.agent_view("a2a-goose-dev", now).unwrap();
+        assert_eq!(view.state, AgentStateName::Rebooting);
+        assert!(view.rebooting);
+        assert_eq!(view.would_install.as_deref(), Some("0.9.2"));
+
+        // Past the window, the same absence is a crash again.
+        let later = now + hub.config().reboot_reconnect_ms + 1;
+        let view = hub.agent_view("a2a-goose-dev", later).unwrap();
+        assert_eq!(view.state, AgentStateName::Offline);
+        assert!(!view.rebooting);
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_clears_the_commanded_reboot() {
+        let hub = hub();
+        let mut tunnel = connect_with(&hub, hello_with("boot-a", &["reboot"]), 0);
+        let task = tokio::spawn({
+            let hub = Arc::clone(&hub);
+            async move { hub.reboot("a2a-goose-dev", false).await }
+        });
+        let frame = next_frame(&mut tunnel).await;
+        let id = frame["id"].as_str().unwrap().to_string();
+        answer_ok(
+            &hub,
+            &id,
+            json!({ "wouldInstall": "0.9.2", "supervised": true, "inFlight": 0 }),
+        );
+        let frame = next_frame(&mut tunnel).await;
+        let id = frame["id"].as_str().unwrap().to_string();
+        answer_ok(&hub, &id, json!({ "restarting": true }));
+        task.await.unwrap().unwrap();
+        let now = now_ms();
+        hub.disconnect("a2a-goose-dev", "boot-a", now);
+        assert!(hub.agent_view("a2a-goose-dev", now).unwrap().rebooting);
+
+        // It comes back on a new boot: live again, no reboot on record.
+        connect_with(&hub, hello_with("boot-b", &["reboot"]), now + 10);
+        let view = hub.agent_view("a2a-goose-dev", now + 10).unwrap();
+        assert_eq!(view.state, AgentStateName::Live);
+        assert!(!view.rebooting);
+        assert_eq!(view.would_install, None);
     }
 
     #[tokio::test]

@@ -38,6 +38,8 @@ event types are ignored, never fatal — version skew is the normal state.
 - `/api/fleet` — the fleet snapshot (JSON).
 - `/api/agents/{id}` and `/api/agents/{id}/activity` — one agent, and its recent
   bounded ring.
+- `/api/agents/{id}/reboot/preflight` and `POST /api/agents/{id}/reboot` — the
+  reboot control (memo §5.5): preflight names the version, the command reboots.
 - `/events` — the browser's SSE fan-out (`event: hub`).
 - `/healthz` — JSON healthcheck (Homepage parses the body).
 - everything else — the built Svelte bundle in `web/dist`.
@@ -102,7 +104,15 @@ when `ROOST_AGENT_TOKENS` is set.
 M2b — the real agent answers `history.*` from goose's `sessions.db` on its own
 host (`a2a-goose` side); the hub's proxy routes were already in place.
 
-Still to come: commands (M4).
+M4 — commands: the reboot control (memo §5.5).
+`/api/agents/{id}/reboot/preflight` names the version a reboot *would* install;
+`POST /api/agents/{id}/reboot` commands it, refusing when the agent reports no
+supervisor, or — unless `force` — when turns are in flight. A commanded reboot
+renders as `rebooting` until the agent reconnects or the reconnect window
+(`ROOST_REBOOT_RECONNECT_MS`) lapses, so a restart the hub asked for is never
+read as a crash.
+
+Still to come: the notification path (M5).
 
 A tunnel is only trusted while it is **carrying traffic**. TCP can die without a
 FIN, and a half-open socket parks `read()` forever — an agent that vanished would

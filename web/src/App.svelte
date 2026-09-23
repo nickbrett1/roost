@@ -5,9 +5,11 @@
 		fetchFleet,
 		fetchHistoryMessages,
 		fetchHistorySessions,
+		fetchRebootPreflight,
 		fleetSummary,
 		foldActivity,
 		openEventStream,
+		rebootAgent,
 		relativeAge,
 		searchHistory,
 		stateLabel
@@ -33,6 +35,13 @@
 	let activityEntries = $state([]);
 	let activityError = $state(null);
 	let activity = $derived(foldActivity(activityEntries));
+
+	// The reboot control (memo §5.5). It is armed by a *preflight*, which names
+	// the version that would be installed; nothing irreversible happens until the
+	// operator confirms against that version in the prompt below.
+	let rebootPrompt = $state(null); // { agentId, preflight }
+	let rebootError = $state(null);
+	let rebootNotice = $state(null);
 
 	// The hub's ring is bounded (512); mirror that bound so a long-lived view
 	// holds no more than the hub would have sent it anyway.
@@ -126,6 +135,34 @@
 		}
 	}
 
+	async function startReboot(agentId) {
+		rebootError = null;
+		rebootNotice = null;
+		try {
+			const preflight = await fetchRebootPreflight(agentId);
+			rebootPrompt = { agentId, preflight };
+		} catch (cause) {
+			rebootError = cause.message;
+		}
+	}
+
+	async function confirmReboot(force) {
+		if (!rebootPrompt) return;
+		const { agentId } = rebootPrompt;
+		try {
+			const ack = await rebootAgent(agentId, { force });
+			rebootPrompt = null;
+			rebootNotice = `${agentId} rebooting${ack.wouldInstall ? ` to ${ack.wouldInstall}` : ""}…`;
+		} catch (cause) {
+			rebootError = cause.message;
+		}
+	}
+
+	function dismissReboot() {
+		rebootPrompt = null;
+		rebootError = null;
+	}
+
 	onMount(() => {
 		load();
 
@@ -172,6 +209,7 @@
 			{summary.total} agents
 			{#if summary.live > 0}· {summary.live} live{/if}
 			{#if summary.stuck > 0}· <span class="warn">{summary.stuck} stuck</span>{/if}
+			{#if summary.rebooting > 0}· <span class="busy">{summary.rebooting} rebooting</span>{/if}
 			{#if summary.offline > 0}· {summary.offline} offline{/if}
 		</p>
 		<span class="link" class:up={connected}>{connected ? "live" : "disconnected"}</span>
@@ -193,6 +231,7 @@
 					<th>in flight</th>
 					<th>last event</th>
 					<th>state</th>
+					<th>control</th>
 				</tr>
 			</thead>
 			<tbody>
@@ -208,10 +247,53 @@
 						<td>{agent.inFlight}</td>
 						<td>{relativeAge(agent.lastEventAtMs, nowMs)}</td>
 						<td>{stateLabel(agent.state)}</td>
+						<td class="control">
+							{#if agent.capabilities?.includes("reboot")}
+								<button
+									onclick={(event) => {
+										event.stopPropagation();
+										startReboot(agent.agentId);
+									}}
+									disabled={!agent.connected || agent.rebooting}
+								>
+									reboot
+								</button>
+							{:else}
+								<span class="muted">—</span>
+							{/if}
+						</td>
 					</tr>
 				{/each}
 			</tbody>
 		</table>
+	{/if}
+
+	{#if rebootError}
+		<p class="error">reboot: {rebootError}</p>
+	{/if}
+	{#if rebootNotice}
+		<p class="muted">{rebootNotice}</p>
+	{/if}
+	{#if rebootPrompt}
+		<div class="confirm">
+			<p>
+				Reboot <strong>{rebootPrompt.agentId}</strong>? It would install
+				<strong>{rebootPrompt.preflight.wouldInstall ?? "an unknown version"}</strong>.
+			</p>
+			{#if !rebootPrompt.preflight.supervised}
+				<p class="error">No supervisor: this agent would not come back. Refused — use SSH.</p>
+				<button onclick={dismissReboot}>dismiss</button>
+			{:else if rebootPrompt.preflight.inFlight > 0}
+				<p class="warn">
+					{rebootPrompt.preflight.inFlight} turn(s) in flight — rebooting kills them.
+				</p>
+				<button onclick={() => confirmReboot(true)}>reboot anyway</button>
+				<button onclick={dismissReboot}>cancel</button>
+			{:else}
+				<button onclick={() => confirmReboot(false)}>reboot now</button>
+				<button onclick={dismissReboot}>cancel</button>
+			{/if}
+		</div>
 	{/if}
 
 	{#if selected}

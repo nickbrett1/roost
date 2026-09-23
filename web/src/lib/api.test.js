@@ -5,9 +5,11 @@ import {
 	fetchFleet,
 	fetchHistoryMessages,
 	fetchHistorySessions,
+	fetchRebootPreflight,
 	fleetSummary,
 	foldActivity,
 	openEventStream,
+	rebootAgent,
 	relativeAge,
 	searchHistory,
 	stateLabel
@@ -89,20 +91,34 @@ describe("fleetSummary", () => {
 			{ state: "live" },
 			{ state: "live" },
 			{ state: "stuck" },
+			{ state: "rebooting" },
 			{ state: "offline" }
 		];
-		expect(fleetSummary(agents)).toEqual({ total: 4, live: 2, stuck: 1, offline: 1 });
+		expect(fleetSummary(agents)).toEqual({
+			total: 5,
+			live: 2,
+			stuck: 1,
+			rebooting: 1,
+			offline: 1
+		});
 	});
 
 	it("handles an empty fleet", () => {
-		expect(fleetSummary([])).toEqual({ total: 0, live: 0, stuck: 0, offline: 0 });
+		expect(fleetSummary([])).toEqual({
+			total: 0,
+			live: 0,
+			stuck: 0,
+			rebooting: 0,
+			offline: 0
+		});
 	});
 
 	it("treats an unrecognised state as offline", () => {
-		expect(fleetSummary([{ state: "rebooting" }])).toEqual({
+		expect(fleetSummary([{ state: "from_the_future" }])).toEqual({
 			total: 1,
 			live: 0,
 			stuck: 0,
+			rebooting: 0,
 			offline: 1
 		});
 	});
@@ -132,11 +148,12 @@ describe("stateLabel", () => {
 	it("labels each known state", () => {
 		expect(stateLabel("live")).toBe("live");
 		expect(stateLabel("stuck")).toBe("STUCK");
+		expect(stateLabel("rebooting")).toBe("rebooting…");
 		expect(stateLabel("offline")).toBe("offline");
 	});
 
 	it("passes an unknown state through and handles undefined", () => {
-		expect(stateLabel("rebooting")).toBe("rebooting");
+		expect(stateLabel("from_the_future")).toBe("from_the_future");
 		expect(stateLabel(undefined)).toBe("unknown");
 	});
 });
@@ -309,5 +326,73 @@ describe("foldActivity", () => {
 
 	it("survives an empty ring", () => {
 		expect(foldActivity([])).toEqual([]);
+	});
+});
+
+describe("reboot helpers", () => {
+	it("reads a preflight and names the version", async () => {
+		const fetchImpl = vi.fn(async () => ({
+			ok: true,
+			json: async () => ({ preflight: { wouldInstall: "0.9.2", supervised: true, inFlight: 0 } })
+		}));
+		await expect(fetchRebootPreflight("a2a-goose-dev", fetchImpl)).resolves.toEqual({
+			wouldInstall: "0.9.2",
+			supervised: true,
+			inFlight: 0
+		});
+		expect(fetchImpl).toHaveBeenCalledWith("/api/agents/a2a-goose-dev/reboot/preflight");
+	});
+
+	it("defaults a preflight with no body to the safe answer", async () => {
+		const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => ({}) }));
+		await expect(fetchRebootPreflight("a", fetchImpl)).resolves.toEqual({
+			wouldInstall: null,
+			supervised: false,
+			inFlight: 0
+		});
+	});
+
+	it("surfaces a refused preflight's reason", async () => {
+		const fetchImpl = vi.fn(async () => ({
+			ok: false,
+			status: 409,
+			json: async () => ({ error: "reboot_unsupervised", message: "no supervisor" })
+		}));
+		await expect(fetchRebootPreflight("nas", fetchImpl)).rejects.toThrow("no supervisor");
+	});
+
+	it("posts a reboot and unwraps the acknowledgement", async () => {
+		const fetchImpl = vi.fn(async () => ({
+			ok: true,
+			json: async () => ({ reboot: { restarting: true, inFlight: 0, wouldInstall: "0.9.2" } })
+		}));
+		await expect(rebootAgent("a2a-goose-dev", {}, fetchImpl)).resolves.toEqual({
+			restarting: true,
+			inFlight: 0,
+			wouldInstall: "0.9.2"
+		});
+		const [path, init] = fetchImpl.mock.calls[0];
+		expect(path).toBe("/api/agents/a2a-goose-dev/reboot");
+		expect(init.method).toBe("POST");
+		expect(JSON.parse(init.body)).toEqual({ force: false });
+	});
+
+	it("passes force through, and surfaces a refusal", async () => {
+		const forced = vi.fn(async () => ({ ok: true, json: async () => ({ reboot: {} }) }));
+		await rebootAgent("a", { force: true }, forced);
+		expect(JSON.parse(forced.mock.calls[0][1].body)).toEqual({ force: true });
+
+		const refused = vi.fn(async () => ({
+			ok: false,
+			status: 409,
+			json: async () => ({ error: "turns_in_flight", message: "2 turns in flight" })
+		}));
+		await expect(rebootAgent("a", {}, refused)).rejects.toThrow("2 turns in flight");
+	});
+
+	it("falls back to a status message when the body carries none", async () => {
+		const fetchImpl = vi.fn(async () => ({ ok: false, status: 502, json: async () => ({}) }));
+		await expect(rebootAgent("a", {}, fetchImpl)).rejects.toThrow("reboot failed: 502");
+		await expect(fetchRebootPreflight("a", fetchImpl)).rejects.toThrow("preflight failed: 502");
 	});
 });
