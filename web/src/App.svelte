@@ -12,6 +12,7 @@
 		searchHistory,
 		stateLabel
 	} from "./lib/api.js";
+	import { FLEET_HASH, agentHash, parseRoute, sessionHash } from "./lib/route.js";
 
 	let agents = $state([]);
 	let connected = $state(false);
@@ -19,7 +20,10 @@
 	let nowMs = $state(Date.now());
 
 	// Drill-down state (memo §6.2): history is proxied to the agent on demand.
+	// Two levels of it: the open agent, and the open session inside it. Both
+	// come from the hash (see lib/route.js), never from a click handler alone.
 	let selected = $state(null);
+	let sessionId = $state(null);
 	let historyError = $state(null);
 	let search = $state("");
 	let sessions = $state(null);
@@ -93,33 +97,31 @@
 	}
 
 	function openAgent(agentId) {
-		if (selected === agentId) {
-			location.hash = "#/";
-			return;
-		}
-		location.hash = `#/agent/${encodeURIComponent(agentId)}`;
+		location.hash = selected === agentId ? FLEET_HASH : agentHash(agentId);
 	}
 
+	/// Back one level. From a session that is the agent; from the agent that is
+	/// the fleet. Same string either way, so one button serves both views.
 	function back() {
-		location.hash = "#/";
+		location.hash = selected && sessionId ? agentHash(selected) : FLEET_HASH;
 	}
 
-	function agentFromHash() {
-		const match = /^#\/agent\/(.+)$/.exec(location.hash);
-		return match ? decodeURIComponent(match[1]) : null;
-	}
-
-	// The hash is the single source of truth for which view is open, so both
-	// the row click and the back button take the same path through here.
+	// The hash is the single source of truth for which view is open, so a row
+	// tap, a session tap and the back button all take this one path.
 	function syncFromHash() {
-		const agentId = agentFromHash();
-		if (agentId === selected) return;
-		resetDrilldown();
-		selected = agentId;
-		if (agentId) {
-			loadSessions(agentId);
-			loadActivity(agentId);
+		const route = parseRoute(location.hash);
+		if (route.agentId === selected && route.sessionId === sessionId) return;
+		if (route.agentId !== selected) {
+			resetDrilldown();
+			selected = route.agentId;
+			if (route.agentId) {
+				loadSessions(route.agentId);
+				loadActivity(route.agentId);
+			}
 		}
+		if (route.sessionId !== sessionId) transcript = null;
+		sessionId = route.sessionId;
+		if (route.sessionId) loadTranscript(route.agentId, route.sessionId);
 	}
 
 	async function loadActivity(agentId) {
@@ -165,14 +167,20 @@
 		}
 	}
 
-	async function openSession(sessionId) {
+	async function loadTranscript(agentId, id) {
 		try {
-			const page = await fetchHistoryMessages(selected, sessionId, { limit: 20 });
-			transcript = { sessionId, ...page };
+			const page = await fetchHistoryMessages(agentId, id, { limit: 20 });
+			transcript = { sessionId: id, ...page };
 			historyError = null;
 		} catch (cause) {
 			historyError = cause.message;
 		}
+	}
+
+	/// Opening a session replaces the session list with its transcript: the
+	/// list is what you were reading, so it is not kept underneath.
+	function openSession(id) {
+		location.hash = sessionHash(selected, id);
 	}
 
 	onMount(() => {
@@ -233,16 +241,27 @@
 	// width on a phone. Show it only when the fleet actually disagrees about
 	// what kind of thing it holds.
 	const showKind = $derived(new Set(agents.map((agent) => agent.kind)).size > 1);
+
+	// A session's own name when we have it (from the list or a search match),
+	// else its id: a deep link must still be able to title the view it opened.
+	const sessionName = $derived(
+		[...(sessions ?? []), ...(matches ?? [])].find((entry) => entry.sessionId === sessionId)
+			?.name ??
+			sessionId ??
+			""
+	);
 </script>
 
 <main>
 	<header>
 		{#if selected}
-			<button class="back" onclick={back}>← fleet</button>
+			<button class="back" onclick={back}>{sessionId ? `← ${selected}` : "← fleet"}</button>
 		{/if}
-		<h1>{selected ?? "mission control"}</h1>
+		<h1>{selected ? (sessionId ? sessionName : selected) : "mission control"}</h1>
 		{#if selected}
-			{#if selectedAgent}
+			{#if sessionId}
+				<span class="muted">{sessionId}</span>
+			{:else if selectedAgent}
 				<span class="chip {selectedAgent.state}">{stateLabel(selectedAgent.state)}</span>
 			{/if}
 		{:else}
@@ -261,6 +280,28 @@
 	{/if}
 
 	{#if selected}
+		{#if sessionId}
+			<!-- The session's own view. The session list it came from is not kept
+			     underneath: on a phone that is what pushed the transcript off the
+			     bottom of the screen. -->
+			<section class="drilldown">
+				{#if historyError}
+					<p class="error">history unavailable: {historyError}</p>
+				{:else if transcript === null}
+					<p class="muted">loading…</p>
+				{:else}
+					{#each transcript.messages as message, i (i)}
+						<p class="message">
+							<span class="role">{message.role}</span>
+							{message.text}
+						</p>
+					{/each}
+					{#if transcript.nextCursor}
+						<p class="muted">more messages available</p>
+					{/if}
+				{/if}
+			</section>
+		{:else}
 		<section class="drilldown">
 			<div class="columns">
 				<div class="live">
@@ -347,22 +388,10 @@
 							{/each}
 						{/if}
 					{/if}
-
-					{#if transcript}
-						<h3>transcript · {transcript.sessionId}</h3>
-						{#each transcript.messages as message, i (i)}
-							<p class="message">
-								<span class="role">{message.role}</span>
-								{message.text}
-							</p>
-						{/each}
-						{#if transcript.nextCursor}
-							<p class="muted">more messages available</p>
-						{/if}
-					{/if}
 				</div>
 			</div>
 		</section>
+		{/if}
 	{:else if agents.length === 0}
 		<p class="empty">No agents connected. No tunnel client has dialed in yet.</p>
 	{:else}
