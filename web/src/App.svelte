@@ -58,8 +58,11 @@
 		}
 	}
 
-	function select(agentId) {
-		selected = selected === agentId ? null : agentId;
+	// The drill-down is its own view, not a panel hung below the table: on a
+	// phone the table plus the panel put the conversation off the bottom of the
+	// screen. Selecting an agent replaces the fleet view with it, and the hash
+	// carries the choice so the browser's back button and a reload both work.
+	function resetDrilldown() {
 		search = "";
 		matches = null;
 		transcript = null;
@@ -67,9 +70,35 @@
 		sessions = null;
 		activityEntries = [];
 		activityError = null;
-		if (selected) {
-			loadSessions(selected);
-			loadActivity(selected);
+	}
+
+	function openAgent(agentId) {
+		if (selected === agentId) {
+			location.hash = "#/";
+			return;
+		}
+		location.hash = `#/agent/${encodeURIComponent(agentId)}`;
+	}
+
+	function back() {
+		location.hash = "#/";
+	}
+
+	function agentFromHash() {
+		const match = /^#\/agent\/(.+)$/.exec(location.hash);
+		return match ? decodeURIComponent(match[1]) : null;
+	}
+
+	// The hash is the single source of truth for which view is open, so both
+	// the row click and the back button take the same path through here.
+	function syncFromHash() {
+		const agentId = agentFromHash();
+		if (agentId === selected) return;
+		resetDrilldown();
+		selected = agentId;
+		if (agentId) {
+			loadSessions(agentId);
+			loadActivity(agentId);
 		}
 	}
 
@@ -128,6 +157,8 @@
 
 	onMount(() => {
 		load();
+		syncFromHash();
+		window.addEventListener("hashchange", syncFromHash);
 
 		// The fleet snapshot is authoritative; live deltas keep ages honest.
 		const close = openEventStream({
@@ -156,6 +187,7 @@
 		return () => {
 			close();
 			clearInterval(tick);
+			window.removeEventListener("hashchange", syncFromHash);
 		};
 	});
 
@@ -185,13 +217,22 @@
 
 <main>
 	<header>
-		<h1>mission control</h1>
-		<p class="summary">
-			{summary.total} agents
-			{#if summary.live > 0}· {summary.live} live{/if}
-			{#if summary.stuck > 0}· <span class="warn">{summary.stuck} stuck</span>{/if}
-			{#if summary.offline > 0}· {summary.offline} offline{/if}
-		</p>
+		{#if selected}
+			<button class="back" onclick={back}>← fleet</button>
+		{/if}
+		<h1>{selected ?? "mission control"}</h1>
+		{#if selected}
+			{#if selectedAgent}
+				<span class="chip {selectedAgent.state}">{stateLabel(selectedAgent.state)}</span>
+			{/if}
+		{:else}
+			<p class="summary">
+				{summary.total} agents
+				{#if summary.live > 0}· {summary.live} live{/if}
+				{#if summary.stuck > 0}· <span class="warn">{summary.stuck} stuck</span>{/if}
+				{#if summary.offline > 0}· {summary.offline} offline{/if}
+			</p>
+		{/if}
 		<span class="link" class:up={connected}>{connected ? "live" : "disconnected"}</span>
 	</header>
 
@@ -199,49 +240,8 @@
 		<p class="error">Could not reach the hub API: {error}</p>
 	{/if}
 
-	{#if agents.length === 0}
-		<p class="empty">No agents connected. No tunnel client has dialed in yet.</p>
-	{:else}
-		<table>
-			<thead>
-				<tr>
-					<th>agent</th>
-					{#if showKind}
-						<th>kind</th>
-					{/if}
-					<th>version</th>
-					<th class="num">in flight</th>
-					<th>last event</th>
-					<th>state</th>
-				</tr>
-			</thead>
-			<tbody>
-				{#each sortedAgents as agent (agent.agentId)}
-					<tr
-						class:selected={selected === agent.agentId}
-						onclick={() => select(agent.agentId)}
-					>
-						<td class="agent">{agent.agentId}</td>
-						{#if showKind}
-							<td>{agent.kind}</td>
-						{/if}
-						<td>{agent.agentVersion}</td>
-						<td class="num">{agent.inFlight}</td>
-						<td class="when">{relativeAge(agent.lastEventAtMs, nowMs)}</td>
-						<td><span class="chip {agent.state}">{stateLabel(agent.state)}</span></td>
-					</tr>
-				{/each}
-			</tbody>
-		</table>
-	{/if}
-
 	{#if selected}
 		<section class="drilldown">
-			<h2>
-				{selected}
-				<span class="muted">· {selectedAgent ? stateLabel(selectedAgent.state) : ""}</span>
-			</h2>
-
 			<div class="columns">
 				<div class="live">
 					<h3>
@@ -275,74 +275,105 @@
 				<div class="history">
 					<h3>history</h3>
 					<div class="searchbar">
-				<input
-					type="search"
-					bind:value={search}
-					placeholder="search this agent's conversations"
-					onkeydown={(event) => event.key === "Enter" && runSearch()}
-				/>
-				<button onclick={runSearch}>search</button>
-				{#if matches !== null}
-					<button onclick={() => (matches = null)}>clear</button>
-				{/if}
-			</div>
+						<input
+							type="search"
+							bind:value={search}
+							placeholder="search this agent's conversations"
+							onkeydown={(event) => event.key === "Enter" && runSearch()}
+						/>
+						<button onclick={runSearch}>search</button>
+						{#if matches !== null}
+							<button onclick={() => (matches = null)}>clear</button>
+						{/if}
+					</div>
 
-			{#if historyError}
-				<p class="error">history unavailable: {historyError}</p>
-			{/if}
+					{#if historyError}
+						<p class="error">history unavailable: {historyError}</p>
+					{/if}
 
-			{#if matches !== null}
-				<h3>matches</h3>
-				{#if matches.length === 0}
-					<p class="muted">no matches</p>
-				{:else}
-					{#each matches as match (match.sessionId)}
-						<p>
-							<button class="link" onclick={() => openSession(match.sessionId)}>
-								{match.name}
-							</button>
-							<span class="muted">{match.matches.length} match(es)</span>
-						</p>
-					{/each}
-				{/if}
-			{:else}
-				<h3>sessions</h3>
-				{#if sessions === null}
-					<p class="muted">loading…</p>
-				{:else if sessions.length === 0}
-					<p class="muted">no sessions</p>
-				{:else}
-					{#each sessions as session (session.sessionId)}
-						<p>
-							<button class="link" onclick={() => openSession(session.sessionId)}>
-								{session.name}
-							</button>
-							<span class="muted">
-								{session.messageCount} messages · {session.tokens} tokens · {relativeAge(
-									Date.parse(session.updatedAt),
-									nowMs
-								)}
-							</span>
-						</p>
-					{/each}
-				{/if}
-			{/if}
+					{#if matches !== null}
+						<h3>matches</h3>
+						{#if matches.length === 0}
+							<p class="muted">no matches</p>
+						{:else}
+							{#each matches as match (match.sessionId)}
+								<p>
+									<button class="link" onclick={() => openSession(match.sessionId)}>
+										{match.name}
+									</button>
+									<span class="muted">{match.matches.length} match(es)</span>
+								</p>
+							{/each}
+						{/if}
+					{:else}
+						<h3>sessions</h3>
+						{#if sessions === null}
+							<p class="muted">loading…</p>
+						{:else if sessions.length === 0}
+							<p class="muted">no sessions</p>
+						{:else}
+							{#each sessions as session (session.sessionId)}
+								<p>
+									<button class="link" onclick={() => openSession(session.sessionId)}>
+										{session.name}
+									</button>
+									<span class="muted">
+										{session.messageCount} messages · {session.tokens} tokens · {relativeAge(
+											Date.parse(session.updatedAt),
+											nowMs
+										)}
+									</span>
+								</p>
+							{/each}
+						{/if}
+					{/if}
 
-			{#if transcript}
-				<h3>transcript · {transcript.sessionId}</h3>
-				{#each transcript.messages as message, i (i)}
-					<p class="message">
-						<span class="role">{message.role}</span>
-						{message.text}
-					</p>
-				{/each}
-				{#if transcript.nextCursor}
-					<p class="muted">more messages available</p>
-				{/if}
-			{/if}
+					{#if transcript}
+						<h3>transcript · {transcript.sessionId}</h3>
+						{#each transcript.messages as message, i (i)}
+							<p class="message">
+								<span class="role">{message.role}</span>
+								{message.text}
+							</p>
+						{/each}
+						{#if transcript.nextCursor}
+							<p class="muted">more messages available</p>
+						{/if}
+					{/if}
 				</div>
 			</div>
 		</section>
+	{:else if agents.length === 0}
+		<p class="empty">No agents connected. No tunnel client has dialed in yet.</p>
+	{:else}
+		<table>
+			<thead>
+				<tr>
+					<th>agent</th>
+					{#if showKind}
+						<th>kind</th>
+					{/if}
+					<th>version</th>
+					<th class="num">in flight</th>
+					<th>last event</th>
+					<th>state</th>
+				</tr>
+			</thead>
+			<tbody>
+				{#each sortedAgents as agent (agent.agentId)}
+					<tr class:selected={selected === agent.agentId} onclick={() => openAgent(agent.agentId)}>
+						<td class="agent">{agent.agentId}</td>
+						{#if showKind}
+							<td>{agent.kind}</td>
+						{/if}
+						<td>{agent.agentVersion}</td>
+						<td class="num">{agent.inFlight}</td>
+						<td class="when">{relativeAge(agent.lastEventAtMs, nowMs)}</td>
+						<td><span class="chip {agent.state}">{stateLabel(agent.state)}</span></td>
+					</tr>
+				{/each}
+			</tbody>
+		</table>
 	{/if}
 </main>
 
@@ -378,11 +409,6 @@
 		font-size: 15px;
 		font-weight: 600;
 		margin: 0;
-	}
-	h2 {
-		font-size: 13px;
-		font-weight: 600;
-		margin: 1.25rem 0 0.5rem;
 	}
 	h3 {
 		font-size: 10px;
@@ -480,6 +506,12 @@
 		border-top: 1px solid rgba(148, 163, 184, 0.12);
 		margin-top: 1rem;
 		padding-top: 0.5rem;
+	}
+	/* The drill-down is a view, not a panel: this is the way back to the fleet. */
+	.back {
+		padding: 1px 8px;
+		font-size: 11px;
+		color: #7dd3fc;
 	}
 	.searchbar {
 		display: flex;
