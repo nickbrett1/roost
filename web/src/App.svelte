@@ -54,7 +54,10 @@
 	// page from a quiet fleet is for the page to say which build it is.
 	const build = {
 		time: stampTime(__BUILD_TIME__),
-		commit: __BUILD_COMMIT__,
+		// CI hands us the full 40-character sha, which wraps to three lines on a
+		// phone. Seven characters is what a commit is called in conversation.
+		commit: __BUILD_COMMIT__.slice(0, 7),
+		fullCommit: __BUILD_COMMIT__,
 		message: __BUILD_MESSAGE__,
 		number: __BUILD_NUMBER__
 	};
@@ -396,7 +399,7 @@
 	<footer class="build">
 		{#if build.number}<span class="tag">#{build.number}</span>{/if}
 		<span class="when">{build.time}</span>
-		<span class="sha">{build.commit}</span>
+		<span class="sha" title={build.fullCommit}>{build.commit}</span>
 		{#if build.message}<span class="subject">{build.message}</span>{/if}
 	</footer>
 </main>
