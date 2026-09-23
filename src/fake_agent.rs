@@ -59,6 +59,16 @@ pub struct FakeAgent {
     /// Credential sent as `Authorization: Bearer` on the handshake. `None` dials
     /// anonymously, which only works when the hub has no tokens configured.
     pub credential: Option<String>,
+    /// The capabilities advertised in `hello` (§5.2). Defaults to the full set;
+    /// drop `reboot` to model an agent too old to be commanded (§5.7).
+    pub capabilities: Vec<String>,
+    /// What a `reboot`/`preflight` reports it would install (§5.5).
+    pub would_install: Option<String>,
+    /// Whether a `reboot`/`preflight` claims a supervisor (§5.5).
+    pub supervised: bool,
+    /// The in-flight count a `reboot`/`preflight` reports. `None` derives it
+    /// from the scenario, so a stuck agent refuses a reboot by default.
+    pub preflight_in_flight: Option<u32>,
 }
 
 impl FakeAgent {
@@ -72,7 +82,40 @@ impl FakeAgent {
             scenario: Scenario::Happy,
             replay_interval: Duration::from_millis(250),
             credential: None,
+            capabilities: vec![
+                "activity".to_string(),
+                "history".to_string(),
+                "logs".to_string(),
+                "reboot".to_string(),
+            ],
+            would_install: Some("0.9.2".to_string()),
+            supervised: true,
+            preflight_in_flight: None,
         }
+    }
+
+    /// Set the advertised capabilities (e.g. `vec![]` to model an old agent).
+    pub fn capabilities(mut self, capabilities: Vec<String>) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+
+    /// Whether the agent claims a supervisor that would bring it back.
+    pub fn supervised(mut self, supervised: bool) -> Self {
+        self.supervised = supervised;
+        self
+    }
+
+    /// The version a `reboot`/`preflight` reports it would install.
+    pub fn would_install(mut self, version: Option<&str>) -> Self {
+        self.would_install = version.map(str::to_string);
+        self
+    }
+
+    /// Pin the in-flight count a preflight reports.
+    pub fn preflight_in_flight(mut self, in_flight: u32) -> Self {
+        self.preflight_in_flight = Some(in_flight);
+        self
     }
 
     /// Dial the hub with this credential. The real agent reads its own from
@@ -108,12 +151,7 @@ impl FakeAgent {
             boot_id: self.boot_id.clone(),
             started_at: Some("2026-09-20T02:30:00Z".to_string()),
             skills: vec!["ask".to_string()],
-            capabilities: vec![
-                "activity".to_string(),
-                "history".to_string(),
-                "logs".to_string(),
-                "reboot".to_string(),
-            ],
+            capabilities: self.capabilities.clone(),
         }
     }
 
@@ -256,7 +294,18 @@ impl FakeAgent {
     fn command_body(&self, action: &str, mode: Option<&str>) -> Value {
         match (action, mode) {
             ("reboot", Some("preflight")) => {
-                json!({ "wouldInstall": "0.9.2", "supervised": true, "inFlight": 0 })
+                let in_flight = self.preflight_in_flight.unwrap_or_else(|| {
+                    if self.scenario == Scenario::Stuck {
+                        1
+                    } else {
+                        0
+                    }
+                });
+                json!({
+                    "wouldInstall": self.would_install,
+                    "supervised": self.supervised,
+                    "inFlight": in_flight,
+                })
             }
             ("reboot", _) => json!({ "restarting": true }),
             _ => json!({}),

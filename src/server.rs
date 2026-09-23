@@ -18,16 +18,19 @@ use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::stream::{SplitStream, Stream, StreamExt};
 use futures_util::SinkExt;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::BroadcastStream;
 use tower_http::services::ServeDir;
 
-use crate::fleet::{now_ms, AgentStatus, Hub, HubEvent, Outbound, PendingMap};
+use crate::fleet::{
+    now_ms, AgentStatus, Hub, HubEvent, Outbound, PendingMap, RebootError, RebootErrorKind,
+};
 use crate::protocol::{ClientFrame, Hello};
 
 /// How long an agent has to send its `hello` before the tunnel is dropped.
@@ -51,6 +54,8 @@ pub fn app(hub: Arc<Hub>) -> Router {
             "/api/agents/{id}/history/sessions/{session}/messages",
             get(history_messages),
         )
+        .route("/api/agents/{id}/reboot/preflight", get(reboot_preflight))
+        .route("/api/agents/{id}/reboot", post(reboot))
         .route("/events", get(events))
         .route("/agent/ws", get(agent_ws))
         .fallback_service(ServeDir::new(static_dir))
@@ -79,6 +84,56 @@ async fn agent_activity(State(hub): State<Arc<Hub>>, Path(id): Path<String>) -> 
         Some(entries) => Json(json!({ "agentId": id, "events": entries })).into_response(),
         None => not_found(&id),
     }
+}
+
+/// A reboot's preflight (§5.5 rule 1): read-only, so the UI can arm a control
+/// by naming the version it *would* install before anything is done.
+async fn reboot_preflight(State(hub): State<Arc<Hub>>, Path(id): Path<String>) -> Response {
+    match hub.reboot_preflight(&id).await {
+        Ok(preflight) => Json(json!({ "ok": true, "preflight": preflight })).into_response(),
+        Err(error) => reboot_error_response(&id, error),
+    }
+}
+
+/// Command a reboot (§5.5). Default-refused while turns are in flight; `force`
+/// is a separate, confirmed decision, not a flag the UI sets by default.
+async fn reboot(
+    State(hub): State<Arc<Hub>>,
+    Path(id): Path<String>,
+    Json(request): Json<RebootRequest>,
+) -> Response {
+    match hub.reboot(&id, request.force).await {
+        Ok(ack) => Json(json!({ "ok": true, "reboot": ack })).into_response(),
+        Err(error) => reboot_error_response(&id, error),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RebootRequest {
+    #[serde(default)]
+    force: bool,
+}
+
+/// A refused reboot carries a status *and* a machine-readable reason, so the UI
+/// distinguishes "this agent cannot reboot" from "a turn is in flight" rather
+/// than showing one generic failure.
+fn reboot_error_response(agent_id: &str, error: RebootError) -> Response {
+    let status = match error.kind {
+        RebootErrorKind::Unreachable => StatusCode::SERVICE_UNAVAILABLE,
+        RebootErrorKind::Agent => StatusCode::BAD_GATEWAY,
+        RebootErrorKind::Unsupported
+        | RebootErrorKind::Unsupervised
+        | RebootErrorKind::InFlight => StatusCode::CONFLICT,
+    };
+    (
+        status,
+        Json(json!({
+            "error": error.kind.code(),
+            "agentId": agent_id,
+            "message": error.message,
+        })),
+    )
+        .into_response()
 }
 
 fn not_found(id: &str) -> Response {

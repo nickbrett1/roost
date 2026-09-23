@@ -73,6 +73,31 @@ async fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
     (status, body)
 }
 
+async fn http_post(addr: SocketAddr, path: &str, body: &str) -> (u16, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).await.expect("write");
+    let mut buffer = Vec::new();
+    stream.read_to_end(&mut buffer).await.expect("read");
+    let text = String::from_utf8_lossy(&buffer).to_string();
+    let status = text
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let body = text
+        .split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or_default()
+        .to_string();
+    (status, body)
+}
+
 #[tokio::test]
 async fn a_fake_agent_registers_and_publishes_activity() {
     let test = start_hub(Config {
@@ -567,5 +592,134 @@ async fn an_agent_cannot_claim_another_agents_identity() {
     assert!(
         test.hub.agent_view("nas-goose", 0).is_none(),
         "a valid token must not authenticate a different agentId"
+    );
+}
+
+/// Wait until `agent_id` is connected.
+async fn wait_connected(test: &TestHub, agent_id: &str) {
+    let hub = Arc::clone(&test.hub);
+    let id = agent_id.to_string();
+    assert!(
+        wait_for(Duration::from_secs(5), || hub
+            .agent_view(&id, roost::fleet::now_ms())
+            .is_some_and(|view| view.connected))
+        .await,
+        "{agent_id} should have registered"
+    );
+}
+
+#[tokio::test]
+async fn a_reboot_is_preflighted_and_commanded() {
+    let test = start_hub(Config {
+        status_poll_ms: 50,
+        ..Config::default()
+    })
+    .await;
+    let _task = spawn_agent(&test, FakeAgent::new("a2a-goose-dev"));
+    wait_connected(&test, "a2a-goose-dev").await;
+
+    // Preflight names the version, read-only (§5.5 rule 1).
+    let (status, body) = http_get(test.addr, "/api/agents/a2a-goose-dev/reboot/preflight").await;
+    assert_eq!(status, 200, "preflight should succeed: {body}");
+    let preflight: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(preflight["preflight"]["wouldInstall"], "0.9.2");
+    assert_eq!(preflight["preflight"]["supervised"], true);
+
+    let (status, body) = http_post(test.addr, "/api/agents/a2a-goose-dev/reboot", "{}").await;
+    assert_eq!(status, 200, "reboot should be accepted: {body}");
+    let reboot: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(reboot["reboot"]["restarting"], true);
+    assert_eq!(reboot["reboot"]["wouldInstall"], "0.9.2");
+}
+
+#[tokio::test]
+async fn a_reboot_is_refused_when_unsupervised() {
+    let test = start_hub(Config {
+        status_poll_ms: 50,
+        ..Config::default()
+    })
+    .await;
+    let _task = spawn_agent(&test, FakeAgent::new("a2a-goose-dev").supervised(false));
+    wait_connected(&test, "a2a-goose-dev").await;
+
+    let (status, body) = http_post(test.addr, "/api/agents/a2a-goose-dev/reboot", "{}").await;
+    assert_eq!(
+        status, 409,
+        "an unsupervised reboot must be refused: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["error"], "reboot_unsupervised");
+
+    // Forcing does not bypass supervision: the agent could not come back.
+    let (status, _) = http_post(
+        test.addr,
+        "/api/agents/a2a-goose-dev/reboot",
+        r#"{"force":true}"#,
+    )
+    .await;
+    assert_eq!(status, 409, "force must not override a missing supervisor");
+}
+
+#[tokio::test]
+async fn a_reboot_is_refused_in_flight_unless_forced() {
+    let test = start_hub(Config {
+        status_poll_ms: 50,
+        ..Config::default()
+    })
+    .await;
+    let _task = spawn_agent(
+        &test,
+        FakeAgent::new("a2a-goose-dev").scenario(Scenario::Stuck),
+    );
+    wait_connected(&test, "a2a-goose-dev").await;
+
+    let (status, body) = http_post(test.addr, "/api/agents/a2a-goose-dev/reboot", "{}").await;
+    assert_eq!(
+        status, 409,
+        "a turn in flight must refuse by default: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["error"], "turns_in_flight");
+
+    // `force` is a separate, confirmed decision (§5.5).
+    let (status, body) = http_post(
+        test.addr,
+        "/api/agents/a2a-goose-dev/reboot",
+        r#"{"force":true}"#,
+    )
+    .await;
+    assert_eq!(status, 200, "a forced reboot should go through: {body}");
+    let reboot: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(reboot["reboot"]["inFlight"], 1);
+}
+
+#[tokio::test]
+async fn a_reboot_is_refused_without_the_capability() {
+    let test = start_hub(Config {
+        status_poll_ms: 50,
+        ..Config::default()
+    })
+    .await;
+
+    // An agent too old to advertise `reboot` (§5.7).
+    let _task = spawn_agent(
+        &test,
+        FakeAgent::new("a2a-goose-dev").capabilities(vec!["activity".to_string()]),
+    );
+    wait_connected(&test, "a2a-goose-dev").await;
+
+    let (status, body) = http_get(test.addr, "/api/agents/a2a-goose-dev/reboot/preflight").await;
+    assert_eq!(
+        status, 409,
+        "an unsupported agent must render as a state: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(error["error"], "reboot_unsupported");
+
+    // An unknown agent is unreachable, a different answer (§6.4).
+    let (status, _) = http_post(test.addr, "/api/agents/nobody/reboot", "{}").await;
+    assert_eq!(
+        status, 503,
+        "an unknown agent is unreachable, not unsupported"
     );
 }

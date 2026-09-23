@@ -47,10 +47,11 @@ export function openEventStream({ onEvent, onError, EventSourceImpl = globalThis
  * @returns {{ total: number, live: number, stuck: number, offline: number }}
  */
 export function fleetSummary(agents) {
-	const summary = { total: agents.length, live: 0, stuck: 0, offline: 0 };
+	const summary = { total: agents.length, live: 0, stuck: 0, rebooting: 0, offline: 0 };
 	for (const agent of agents) {
 		if (agent.state === "live") summary.live += 1;
 		else if (agent.state === "stuck") summary.stuck += 1;
+		else if (agent.state === "rebooting") summary.rebooting += 1;
 		else summary.offline += 1;
 	}
 	return summary;
@@ -81,6 +82,7 @@ export function relativeAge(atMs, now) {
 export function stateLabel(state) {
 	if (state === "stuck") return "STUCK";
 	if (state === "offline") return "offline";
+	if (state === "rebooting") return "rebooting…";
 	if (state === "live") return "live";
 	return state ?? "unknown";
 }
@@ -272,4 +274,48 @@ export function foldActivity(entries, { limit = 120 } = {}) {
 	const kept = lines.slice(-limit);
 	for (const line of kept) delete line.open;
 	return kept;
+}
+
+/** Pull the hub's error text out of a failed response body, if any. */
+async function failure(response, fallback) {
+	const body = await response.json().catch(() => ({}));
+	return new Error(body.message ?? body.error ?? `${fallback}: ${response.status}`);
+}
+
+/**
+ * What a reboot *would* do, without doing it (memo §5.5 rule 1). Read-only, so a
+ * control can name the version before anything irreversible happens.
+ *
+ * @param {string} agentId
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<{ wouldInstall: string|null, supervised: boolean, inFlight: number }>}
+ */
+export async function fetchRebootPreflight(agentId, fetchImpl = globalThis.fetch) {
+	const response = await fetchImpl(
+		`/api/agents/${encodeURIComponent(agentId)}/reboot/preflight`
+	);
+	if (!response.ok) throw await failure(response, "preflight failed");
+	const body = await response.json().catch(() => ({}));
+	return body.preflight ?? { wouldInstall: null, supervised: false, inFlight: 0 };
+}
+
+/**
+ * Command a reboot (memo §5.5). `force` overrides the default refusal while
+ * turns are in flight; it never overrides a missing supervisor, because the
+ * agent could not come back from that.
+ *
+ * @param {string} agentId
+ * @param {{ force?: boolean }} [options]
+ * @param {typeof fetch} [fetchImpl]
+ * @returns {Promise<object>} the acknowledgement
+ */
+export async function rebootAgent(agentId, options = {}, fetchImpl = globalThis.fetch) {
+	const response = await fetchImpl(`/api/agents/${encodeURIComponent(agentId)}/reboot`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ force: Boolean(options.force) })
+	});
+	if (!response.ok) throw await failure(response, "reboot failed");
+	const body = await response.json().catch(() => ({}));
+	return body.reboot ?? {};
 }

@@ -38,6 +38,11 @@ pub struct Config {
     pub tunnel_idle_ms: Option<u64>,
     /// How long a `request` waits for its `response` before giving up.
     pub request_timeout_ms: u64,
+    /// How long after the hub commands a reboot an agent may stay offline before
+    /// it is read as *crashed* rather than *restarting* (§5.5, §6.3). A
+    /// commanded reboot is a known, bounded absence — within this window the
+    /// fleet view shows `rebooting`, and past it the agent is genuinely gone.
+    pub reboot_reconnect_ms: u64,
     /// Per-agent credentials, keyed by `agentId`. Empty means authentication is
     /// **off** (§7.1): the tailnet is then the only boundary, which is a choice
     /// an operator makes by not configuring any.
@@ -55,6 +60,7 @@ impl Default for Config {
             auth_off_ack: false,
             tunnel_idle_ms: None,
             request_timeout_ms: 10_000,
+            reboot_reconnect_ms: 120_000,
             agent_tokens: HashMap::new(),
         }
     }
@@ -87,6 +93,9 @@ impl Config {
         }
         if let Some(ms) = read_u64("ROOST_REQUEST_TIMEOUT_MS") {
             config.request_timeout_ms = ms;
+        }
+        if let Some(ms) = read_u64("ROOST_REBOOT_RECONNECT_MS") {
+            config.reboot_reconnect_ms = ms;
         }
         if let Ok(tokens) = env::var("ROOST_AGENT_TOKENS") {
             config.agent_tokens = parse_agent_tokens(&tokens);
