@@ -12,6 +12,12 @@
 # (see web/README.md).
 FROM node:22-bookworm AS frontend
 WORKDIR /app
+# Baked into the bundle as the build stamp (see web/vite.config.js). CI passes
+# the real values; the defaults are the honest "unknown" of a local build.
+ARG BUILD_COMMIT=""
+ARG BUILD_MESSAGE=""
+ARG BUILD_NUMBER=""
+ENV BUILD_COMMIT="${BUILD_COMMIT}" BUILD_MESSAGE="${BUILD_MESSAGE}" BUILD_NUMBER="${BUILD_NUMBER}"
 COPY web/package.json web/package-lock.json* web/.npmrc* ./
 RUN PINNED_NPM="$(node -p "try{require('./package.json').packageManager}catch(e){''}" 2>/dev/null || true)" \
     && if [ -n "$PINNED_NPM" ] && [ "$(npm --version)" != "${PINNED_NPM#npm@}" ]; then \
@@ -20,7 +26,9 @@ RUN PINNED_NPM="$(node -p "try{require('./package.json').packageManager}catch(e)
        fi \
     && if [ -f package-lock.json ]; then npm ci; else npm install; fi
 COPY web/. .
-RUN npm run build
+# The timestamp is the build's own clock: it is what makes "the page I am
+# looking at was built at 22:41" checkable against the build log.
+RUN BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" npm run build
 
 FROM rust:1-slim AS build
 WORKDIR /app

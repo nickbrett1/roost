@@ -13,9 +13,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
-use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
+use axum::extract::{Path, Query, Request, State};
+use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, WWW_AUTHENTICATE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -54,7 +55,35 @@ pub fn app(hub: Arc<Hub>) -> Router {
         .route("/events", get(events))
         .route("/agent/ws", get(agent_ws))
         .fallback_service(ServeDir::new(static_dir))
+        .layer(middleware::from_fn(cache_control))
         .with_state(hub)
+}
+
+/// Freshness, so "am I looking at the latest build?" has an answer.
+///
+/// Vite names everything under `/assets` after a hash of its contents, so those
+/// files can be cached forever: a new build writes new names and never reuses
+/// the old ones. Everything else — above all `index.html` — is revalidated on
+/// every load, which is what stops a phone serving yesterday's page while the
+/// fleet has moved on. (And the page carries its own build stamp, so a stale
+/// copy says so out loud rather than looking merely quiet.)
+async fn cache_control(request: Request, next: Next) -> Response {
+    let path = request.uri().path().to_owned();
+    let mut response = next.run(request).await;
+    // The API and the SSE fan-out carry live data, never a cached document.
+    let value = if path.starts_with("/assets/") {
+        Some("public, max-age=31536000, immutable")
+    } else if path.starts_with("/api/") || path.starts_with("/agent/") || path == "/events" {
+        None
+    } else {
+        Some("no-cache")
+    };
+    if let Some(value) = value {
+        response
+            .headers_mut()
+            .insert(CACHE_CONTROL, HeaderValue::from_static(value));
+    }
+    response
 }
 
 /// The declared healthcheck. JSON, not bare text: Homepage's `customapi`
