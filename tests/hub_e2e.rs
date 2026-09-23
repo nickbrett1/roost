@@ -73,6 +73,58 @@ async fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
     (status, body)
 }
 
+/// The whole response, headers included. Freshness is a header, so the cache
+/// test cannot go through `http_get`, which throws them away.
+async fn http_get_raw(addr: SocketAddr, path: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.expect("write");
+    let mut buffer = Vec::new();
+    stream.read_to_end(&mut buffer).await.expect("read");
+    String::from_utf8_lossy(&buffer).to_string()
+}
+
+/// The build stamp is only useful if the browser re-reads the page that carries
+/// it, so how the bundle is cached is part of the feature, not a deployment
+/// detail. Hashed assets may be cached forever; the page may not.
+#[tokio::test]
+async fn hashed_assets_are_immutable_but_the_page_is_revalidated() {
+    let dir = std::env::temp_dir().join(format!("roost-static-cache-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("assets")).expect("mkdir");
+    std::fs::write(
+        dir.join("index.html"),
+        "<!doctype html><title>roost</title>",
+    )
+    .expect("index");
+    std::fs::write(dir.join("assets/index-abc123.js"), "console.log(1)").expect("asset");
+
+    let test = start_hub(Config {
+        static_dir: dir.to_string_lossy().into_owned(),
+        ..Config::default()
+    })
+    .await;
+
+    let page = http_get_raw(test.addr, "/").await;
+    assert!(
+        page.starts_with("HTTP/1.1 200"),
+        "index.html must be served, got: {page}"
+    );
+    assert!(
+        page.to_lowercase().contains("cache-control: no-cache"),
+        "the page must revalidate on every load, got: {page}"
+    );
+
+    let asset = http_get_raw(test.addr, "/assets/index-abc123.js").await;
+    assert!(
+        asset.to_lowercase().contains("immutable"),
+        "a content-hashed asset may be cached forever, got: {asset}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn a_fake_agent_registers_and_publishes_activity() {
     let test = start_hub(Config {

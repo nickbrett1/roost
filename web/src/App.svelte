@@ -49,6 +49,23 @@
 		return at ? at.slice(11, 19) : "";
 	}
 
+	// The build stamp, baked in at bundle time by vite (`define` in
+	// vite.config.js). Shown on the page because the only way to tell a stale
+	// page from a quiet fleet is for the page to say which build it is.
+	const build = {
+		time: stampTime(__BUILD_TIME__),
+		commit: __BUILD_COMMIT__,
+		message: __BUILD_MESSAGE__,
+		number: __BUILD_NUMBER__
+	};
+
+	/// ISO instant (UTC) -> "YYYY-MM-DD HH:MM UTC". Sliced, not localised: on a
+	/// phone the locale and timezone would make this harder to compare against a
+	/// build log, which is the only thing it is for.
+	function stampTime(iso) {
+		return iso && iso.length >= 16 ? `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC` : "";
+	}
+
 	async function load() {
 		try {
 			agents = await fetchFleet();
@@ -375,6 +392,13 @@
 			</tbody>
 		</table>
 	{/if}
+
+	<footer class="build">
+		{#if build.number}<span class="tag">#{build.number}</span>{/if}
+		<span class="when">{build.time}</span>
+		<span class="sha">{build.commit}</span>
+		{#if build.message}<span class="subject">{build.message}</span>{/if}
+	</footer>
 </main>
 
 <style>
@@ -634,6 +658,29 @@
 	}
 	.text {
 		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+	}
+	/* The build stamp. Deliberately the dullest thing on the page: it is read
+	   when something looks wrong, not when it looks right. */
+	.build {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.4rem;
+		align-items: baseline;
+		margin-top: 2rem;
+		padding-top: 0.5rem;
+		border-top: 1px solid rgba(148, 163, 184, 0.12);
+		font-size: 10px;
+		opacity: 0.45;
+	}
+	.build .when {
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+	}
+	.build .sha {
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	}
+	.build .subject {
 		overflow-wrap: anywhere;
 	}
 </style>

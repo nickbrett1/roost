@@ -59,8 +59,16 @@ steps:
     env:
       SMOKE_IMAGE: roost-smoke
     commands:
-      - >-
-        docker build -t "$$SMOKE_IMAGE:$$BUILDKITE_COMMIT" .
+      - |
+        set -euo pipefail
+        # The build stamp the page reports (web/vite.config.js). Subject only:
+        # a commit body would be noise in a footer and a multi-line arg.
+        SUBJECT="$$(printf '%s' "$$BUILDKITE_MESSAGE" | head -n 1)"
+        docker build \
+          --build-arg BUILD_COMMIT="$$BUILDKITE_COMMIT" \
+          --build-arg BUILD_MESSAGE="$$SUBJECT" \
+          --build-arg BUILD_NUMBER="$$BUILDKITE_BUILD_NUMBER" \
+          -t "$$SMOKE_IMAGE:$$BUILDKITE_COMMIT" .
       - |
         set -euo pipefail
         CONTAINER="$$SMOKE_IMAGE-$$BUILDKITE_JOB_ID"
@@ -139,7 +147,11 @@ steps:
           exit 0
         fi
         docker buildx create --bootstrap --name "$$BUILDX_BUILDER_NAME" >/dev/null
+        SUBJECT="$$(printf '%s' "$$BUILDKITE_MESSAGE" | head -n 1)"
         docker buildx build --builder "$$BUILDX_BUILDER_NAME" --platform linux/amd64 \
+          --build-arg BUILD_COMMIT="$$BUILDKITE_COMMIT" \
+          --build-arg BUILD_MESSAGE="$$SUBJECT" \
+          --build-arg BUILD_NUMBER="$$BUILDKITE_BUILD_NUMBER" \
           --cache-from type=registry,ref=$$CACHE_REF \
           --cache-to type=registry,ref=$$CACHE_REF,mode=max \
           -t $$IMAGE:$$BUILDKITE_COMMIT -t $$IMAGE:latest --push .
