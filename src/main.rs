@@ -16,10 +16,14 @@ async fn main() -> anyhow::Result<()> {
     // the tailnet is the only door, so say so out loud rather than leave an
     // operator to assume `/agent/ws` is gated.
     if !config.agent_auth_enabled() {
-        eprintln!(
-            "WARNING: no ROOST_AGENT_TOKENS configured; /agent/ws accepts any agent \
-             (authentication off)"
-        );
+        if config.auth_off_ack {
+            println!("authentication off: /agent/ws accepts any agent (acknowledged by ROOST_AUTH_OFF_ACK)");
+        } else {
+            eprintln!(
+                "WARNING: no ROOST_AGENT_TOKENS configured; /agent/ws accepts any agent \
+                 (authentication off). Set ROOST_AUTH_OFF_ACK=1 to accept this silently."
+            );
+        }
     }
 
     let hub = Hub::new(config);

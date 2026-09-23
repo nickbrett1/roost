@@ -56,7 +56,7 @@ cargo run --bin fake_agent -- --scenario stuck --id a2a-goose-nas
 
 Then open <http://127.0.0.1:3000/>. Configuration is environment-driven:
 `PORT`, `ROOST_STATIC_DIR`, `ROOST_STUCK_AFTER_MS`, `ROOST_STATUS_POLL_MS`,
-`ROOST_RING_SIZE`, `ROOST_TUNNEL_IDLE_MS`. The fake agent reads `ROOST_HUB_URL`.
+`ROOST_RING_SIZE`, `ROOST_TUNNEL_IDLE_MS`, `ROOST_AUTH_OFF_ACK`. The fake agent reads `ROOST_HUB_URL`.
 
 `ROOST_AGENT_TOKENS` gates the agent tunnel (§7.1). It is a comma-separated map
 of `agentId=token`, e.g.:
@@ -68,7 +68,11 @@ ROOST_AGENT_TOKENS='mac-studio-goose=s3cret,nas-goose=other' cargo run
 When it is set, a dial to `/agent/ws` must carry `Authorization: Bearer <token>`
 and the token must belong to the `agentId` the `hello` claims — one agent's token
 does not authenticate another's identity. When it is **unset**, authentication is
-off: the tailnet is then the only boundary, and the hub says so on startup.
+off: the tailnet is then the only boundary, and the hub says so on startup—
+a `WARNING` by default, or a plain line if `ROOST_AUTH_OFF_ACK` is set to an
+acknowledgement (`1`/`true`/`yes`/`on`), which records the decision without
+hiding it. An unrecognised value is not an acknowledgement, so a typo still
+warns.
 
 ## Tests
 
