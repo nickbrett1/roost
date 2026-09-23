@@ -21,6 +21,11 @@ pub struct Config {
     pub stuck_after_ms: u64,
     /// How often the hub asks a connected agent for `status.get`.
     pub status_poll_ms: u64,
+    /// An explicit "yes, I meant it": when authentication is off, the hub warns
+    /// at startup so an operator cannot mistake an ungated `/agent/ws` for a
+    /// gated one. Setting `ROOST_AUTH_OFF_ACK` says the trade is understood, and
+    /// the same message is logged as ordinary information rather than a warning.
+    pub auth_off_ack: bool,
     /// How long an agent's tunnel may be **silent** before the hub drops it and
     /// marks it offline. `None` derives it from `status_poll_ms` (see
     /// [`Config::tunnel_idle`]); `Some(ms)` pins it via `ROOST_TUNNEL_IDLE_MS`.
@@ -47,6 +52,7 @@ impl Default for Config {
             ring_size: 512,
             stuck_after_ms: 120_000,
             status_poll_ms: 15_000,
+            auth_off_ack: false,
             tunnel_idle_ms: None,
             request_timeout_ms: 10_000,
             agent_tokens: HashMap::new(),
@@ -75,6 +81,7 @@ impl Config {
         if let Some(ms) = read_u64("ROOST_STATUS_POLL_MS") {
             config.status_poll_ms = ms;
         }
+        config.auth_off_ack = read_truthy("ROOST_AUTH_OFF_ACK");
         if let Some(ms) = read_u64("ROOST_TUNNEL_IDLE_MS") {
             config.tunnel_idle_ms = Some(ms);
         }
@@ -170,9 +177,38 @@ fn read_u64(key: &str) -> Option<u64> {
     env::var(key).ok().and_then(|value| value.parse().ok())
 }
 
+/// A boolean env flag. Anything unrecognised (or absent) is false, so a typo
+/// leaves the default — which for `ROOST_AUTH_OFF_ACK` means the warning still
+/// prints. Fail loud, never accidentally quiet.
+fn read_truthy(key: &str) -> bool {
+    matches!(
+        env::var(key).map(|value| value.trim().to_ascii_lowercase()),
+        Ok(ref value) if matches!(value.as_str(), "1" | "true" | "yes" | "on")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_auth_off_warning_is_only_quiet_when_it_is_acknowledged() {
+        // Absent or unrecognised: the warning still prints. A typo must not
+        // silently turn an ungated /agent/ws into a quiet one.
+        for value in ["", "0", "false", "no", "maybe", "y"] {
+            env::set_var("ROOST_AUTH_OFF_ACK", value);
+            assert!(
+                !read_truthy("ROOST_AUTH_OFF_ACK"),
+                "{value:?} is not an ack"
+            );
+        }
+        // The four spellings an operator would actually reach for.
+        for value in ["1", "true", "YES", " on "] {
+            env::set_var("ROOST_AUTH_OFF_ACK", value);
+            assert!(read_truthy("ROOST_AUTH_OFF_ACK"), "{value:?} is an ack");
+        }
+        env::remove_var("ROOST_AUTH_OFF_ACK");
+    }
 
     #[test]
     fn defaults_match_the_design() {
