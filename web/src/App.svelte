@@ -163,6 +163,24 @@
 	const selectedAgent = $derived(
 		agents.find((agent) => agent.agentId === selected) ?? null
 	);
+
+	// The operator's first question is "who is doing something", so the fleet is
+	// ordered by the last event, newest first. An agent that has never published
+	// anything (lastEventAtMs null) sorts to the bottom rather than the top, and
+	// the agentId tiebreak keeps the order stable as the ages tick.
+	const sortedAgents = $derived(
+		[...agents].sort((a, b) => {
+			const at = a.lastEventAtMs ?? Number.NEGATIVE_INFINITY;
+			const bt = b.lastEventAtMs ?? Number.NEGATIVE_INFINITY;
+			if (bt !== at) return bt - at;
+			return a.agentId.localeCompare(b.agentId);
+		})
+	);
+
+	// Every dev box runs the same kind of agent, so the `kind` column is dead
+	// width on a phone. Show it only when the fleet actually disagrees about
+	// what kind of thing it holds.
+	const showKind = $derived(new Set(agents.map((agent) => agent.kind)).size > 1);
 </script>
 
 <main>
@@ -188,26 +206,29 @@
 			<thead>
 				<tr>
 					<th>agent</th>
-					<th>kind</th>
+					{#if showKind}
+						<th>kind</th>
+					{/if}
 					<th>version</th>
-					<th>in flight</th>
+					<th class="num">in flight</th>
 					<th>last event</th>
 					<th>state</th>
 				</tr>
 			</thead>
 			<tbody>
-				{#each agents as agent (agent.agentId)}
+				{#each sortedAgents as agent (agent.agentId)}
 					<tr
-						class={agent.state}
 						class:selected={selected === agent.agentId}
 						onclick={() => select(agent.agentId)}
 					>
-						<td>{agent.agentId}</td>
-						<td>{agent.kind}</td>
+						<td class="agent">{agent.agentId}</td>
+						{#if showKind}
+							<td>{agent.kind}</td>
+						{/if}
 						<td>{agent.agentVersion}</td>
-						<td>{agent.inFlight}</td>
-						<td>{relativeAge(agent.lastEventAtMs, nowMs)}</td>
-						<td>{stateLabel(agent.state)}</td>
+						<td class="num">{agent.inFlight}</td>
+						<td class="when">{relativeAge(agent.lastEventAtMs, nowMs)}</td>
+						<td><span class="chip {agent.state}">{stateLabel(agent.state)}</span></td>
 					</tr>
 				{/each}
 			</tbody>
@@ -326,55 +347,73 @@
 </main>
 
 <style>
+	/* House style, borrowed from deepseek-balance: a system UI sans on a slate
+	   ground, soft translucent borders, and small uppercase micro-labels. */
+	:global(html) {
+		background: #0f172a;
+		color-scheme: dark;
+	}
+	:global(body) {
+		margin: 0;
+		background: #0f172a;
+		color: #e2e8f0;
+		font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+		font-size: 13px;
+		line-height: 1.4;
+	}
 	main {
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 		max-width: 56rem;
 		margin: 0 auto;
-		padding: 2rem 1rem;
+		padding: 1.25rem 1rem 3rem;
 	}
 	header {
 		display: flex;
 		align-items: baseline;
-		gap: 1rem;
-		border-bottom: 1px solid #333;
-		margin-bottom: 1rem;
+		gap: 0.75rem;
+		border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+		padding-bottom: 0.5rem;
+		margin-bottom: 0.75rem;
 	}
 	h1 {
-		font-size: 1.1rem;
-		letter-spacing: 0.05em;
-		text-transform: uppercase;
+		font-size: 15px;
+		font-weight: 600;
 		margin: 0;
 	}
 	h2 {
-		font-size: 0.95rem;
-		margin: 1.5rem 0 0.5rem;
+		font-size: 13px;
+		font-weight: 600;
+		margin: 1.25rem 0 0.5rem;
 	}
 	h3 {
-		font-size: 0.75rem;
+		font-size: 10px;
+		font-weight: 600;
 		text-transform: uppercase;
-		color: #777;
-		margin: 1rem 0 0.25rem;
+		letter-spacing: 0.06em;
+		opacity: 0.6;
+		margin: 1rem 0 0.35rem;
 	}
 	.summary {
 		margin: 0;
-		color: #999;
+		font-size: 12px;
+		opacity: 0.6;
 	}
 	.link {
 		margin-left: auto;
-		color: #a33;
+		font-size: 12px;
+		color: #f87171;
 	}
 	.link.up {
-		color: #3a3;
+		color: #34d399;
 	}
 	.warn {
-		color: #c80;
+		color: #fdba74;
 	}
 	.empty,
 	.muted {
-		color: #999;
+		opacity: 0.55;
 	}
 	.error {
-		color: #a33;
+		color: #f87171;
 	}
 	table {
 		width: 100%;
@@ -383,71 +422,114 @@
 	th,
 	td {
 		text-align: left;
-		padding: 0.35rem 0.6rem;
-		border-bottom: 1px solid #222;
+		padding: 5px 6px;
+		border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+		font-size: 12px;
+		vertical-align: baseline;
 	}
 	th {
-		color: #777;
-		font-weight: normal;
+		font-weight: 600;
 		text-transform: uppercase;
-		font-size: 0.75rem;
+		letter-spacing: 0.04em;
+		font-size: 10px;
+		opacity: 0.6;
+		white-space: nowrap;
+	}
+	td.num,
+	th.num {
+		text-align: right;
+		font-variant-numeric: tabular-nums;
+	}
+	td.when {
+		white-space: nowrap;
+		font-variant-numeric: tabular-nums;
+		opacity: 0.8;
+	}
+	td.agent {
+		font-weight: 600;
+		white-space: nowrap;
 	}
 	tbody tr {
 		cursor: pointer;
 	}
 	tbody tr:hover {
-		background: #161616;
+		background: rgba(148, 163, 184, 0.06);
 	}
-	tr.stuck td {
-		color: #c80;
+	tr.selected {
+		background: rgba(56, 189, 248, 0.08);
 	}
-	tr.offline td {
-		color: #777;
+	.chip {
+		display: inline-block;
+		font-size: 10px;
+		font-weight: 600;
+		padding: 1px 7px;
+		border-radius: 999px;
+		white-space: nowrap;
+		background: rgba(148, 163, 184, 0.15);
+		color: #94a3b8;
 	}
-	tr.selected td {
-		color: #6cf;
+	.chip.live {
+		background: rgba(52, 211, 153, 0.15);
+		color: #6ee7b7;
+	}
+	.chip.stuck {
+		background: rgba(251, 146, 60, 0.15);
+		color: #fdba74;
 	}
 	.drilldown {
-		border-top: 1px solid #333;
+		border-top: 1px solid rgba(148, 163, 184, 0.12);
+		margin-top: 1rem;
+		padding-top: 0.5rem;
 	}
 	.searchbar {
 		display: flex;
 		gap: 0.5rem;
+		margin: 0.35rem 0;
 	}
 	.searchbar input {
 		flex: 1;
-		background: #111;
-		border: 1px solid #333;
+		min-width: 0;
+		background: rgba(15, 23, 42, 0.6);
+		border: 1px solid rgba(148, 163, 184, 0.25);
+		border-radius: 6px;
 		color: inherit;
-		padding: 0.3rem 0.5rem;
+		padding: 5px 8px;
 		font: inherit;
 	}
+	.searchbar input:focus {
+		outline: none;
+		border-color: rgba(125, 211, 252, 0.6);
+	}
 	button {
-		background: #222;
-		border: 1px solid #444;
-		color: inherit;
-		padding: 0.3rem 0.6rem;
+		background: transparent;
+		border: 1px solid rgba(148, 163, 184, 0.25);
+		border-radius: 6px;
+		color: #cbd5e1;
+		padding: 5px 12px;
 		font: inherit;
 		cursor: pointer;
+	}
+	button:hover {
+		background: rgba(148, 163, 184, 0.1);
 	}
 	button.link {
 		background: none;
 		border: none;
 		padding: 0;
-		color: #6cf;
+		color: #7dd3fc;
 		text-decoration: underline;
 	}
 	.message {
 		margin: 0.25rem 0;
 	}
 	.role {
-		color: #777;
+		opacity: 0.55;
 		margin-right: 0.5rem;
 	}
 	.columns {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-		gap: 1.5rem;
+		gap: 1.25rem;
 		align-items: start;
 	}
 	@media (max-width: 46rem) {
@@ -456,7 +538,7 @@
 		}
 	}
 	.busy {
-		color: #6cf;
+		color: #7dd3fc;
 	}
 	.feed {
 		list-style: none;
@@ -464,26 +546,32 @@
 		padding: 0;
 		max-height: 24rem;
 		overflow-y: auto;
-		border: 1px solid #222;
+		border: 1px solid rgba(148, 163, 184, 0.13);
+		border-radius: 8px;
+		background: rgba(15, 23, 42, 0.35);
 	}
 	.feed li {
 		display: flex;
 		gap: 0.4rem;
-		padding: 0.15rem 0.4rem;
-		border-bottom: 1px solid #181818;
-		font-size: 0.8rem;
+		padding: 0.2rem 0.5rem;
+		border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+		font-size: 12px;
 	}
 	.feed li:last-child {
 		border-bottom: none;
 	}
 	.feed .at {
-		color: #555;
+		color: #60a5fa;
+		opacity: 0.7;
 		flex: 0 0 4.5rem;
+		font-variant-numeric: tabular-nums;
 	}
 	.feed .kind {
-		color: #777;
+		opacity: 0.6;
 		text-transform: uppercase;
-		font-size: 0.7rem;
+		font-size: 10px;
+		font-weight: 600;
+		letter-spacing: 0.04em;
 		flex: 0 0 3.5rem;
 	}
 	.feed .status {
@@ -495,21 +583,22 @@
 	}
 	.feed li.tool_call .text,
 	.feed li.tool_call_update .text {
-		color: #6cf;
+		color: #7dd3fc;
 	}
 	.feed li.answer .text {
-		color: #ded;
+		color: #e2e8f0;
 	}
 	.feed li.failed,
 	.feed li.failed .text {
-		color: #a33;
+		color: #f87171;
 	}
 	.status {
-		color: #c80;
-		font-size: 0.7rem;
+		color: #fdba74;
+		font-size: 10px;
+		font-weight: 600;
 	}
 	.status.done {
-		color: #3a3;
+		color: #34d399;
 	}
 	.text {
 		white-space: pre-wrap;
