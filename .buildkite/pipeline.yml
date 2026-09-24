@@ -144,7 +144,13 @@ steps:
         # SIGINT does not run its EXIT trap, which is how builders and their
         # multi-GB BuildKit state volumes leaked (mac-studio, 2026-09-23).
         trap 'exit 143' TERM INT
-        trap 'rm -rf "$$DOCKER_CONFIG"; docker buildx rm -f "$$BUILDX_BUILDER_NAME" >/dev/null 2>&1 || true; docker volume rm "buildx_buildkit_$${BUILDX_BUILDER_NAME}0_state" >/dev/null 2>&1 || true' EXIT
+        # Order matters. The builder's record lives in DOCKER_CONFIG, so
+        # `docker buildx rm` has to run BEFORE the config dir is deleted -
+        # with the config gone it is a silent no-op (`|| true`) and the
+        # container and its multi-GB state volume are orphaned anyway.
+        # Build #59 did exactly that. The explicit `volume rm` is the
+        # belt-and-braces for a builder whose record is already gone.
+        trap 'docker buildx rm -f "$$BUILDX_BUILDER_NAME" >/dev/null 2>&1 || true; docker volume rm "buildx_buildkit_$${BUILDX_BUILDER_NAME}0_state" >/dev/null 2>&1 || true; rm -rf "$$DOCKER_CONFIG"' EXIT
         echo "$$GHCR_TOKEN" | docker login ghcr.io -u "$$GHCR_USERNAME" --password-stdin
         # Skip if this commit is already published: the release step's ls-remote
         # guard, for an image. Only a positive answer skips - if the registry
