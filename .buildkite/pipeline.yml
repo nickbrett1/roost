@@ -72,7 +72,11 @@ steps:
       - |
         set -euo pipefail
         CONTAINER="$$SMOKE_IMAGE-$$BUILDKITE_JOB_ID"
-        trap 'docker rm -f "$$CONTAINER" >/dev/null 2>&1 || true' EXIT
+        # Remove the per-commit smoke image too, and survive cancellation:
+        # a killed shell does not run its EXIT trap, so these leaked at
+        # ~1 GiB each on mac-studio (2026-09-23: 39 images).
+        trap 'exit 143' TERM INT
+        trap 'docker rm -f "$$CONTAINER" >/dev/null 2>&1 || true; docker rmi "$$SMOKE_IMAGE:$$BUILDKITE_COMMIT" >/dev/null 2>&1 || true' EXIT
         docker run -d --name "$$CONTAINER" "$$SMOKE_IMAGE:$$BUILDKITE_COMMIT" >/dev/null
         # Poll the DECLARED healthcheck. A container that exits (the old rust
         # stub restart-looped) is a failure, so running is checked as well as
@@ -136,7 +140,11 @@ steps:
         # stays per-job and buildx stays reachable. Mirrors the genproj fix.
         ln -sfn "$$HOME/.docker/cli-plugins" "$$DOCKER_CONFIG/cli-plugins"
         BUILDX_BUILDER_NAME="bk-$$BUILDKITE_PIPELINE_SLUG-$$BUILDKITE_JOB_ID"
-        trap 'rm -rf "$$DOCKER_CONFIG"; docker buildx rm "$$BUILDX_BUILDER_NAME" >/dev/null 2>&1 || true' EXIT
+        # Cleanup must run on cancellation too. A shell killed by SIGTERM or
+        # SIGINT does not run its EXIT trap, which is how builders and their
+        # multi-GB BuildKit state volumes leaked (mac-studio, 2026-09-23).
+        trap 'exit 143' TERM INT
+        trap 'rm -rf "$$DOCKER_CONFIG"; docker buildx rm -f "$$BUILDX_BUILDER_NAME" >/dev/null 2>&1 || true; docker volume rm "buildx_buildkit_$${BUILDX_BUILDER_NAME}0_state" >/dev/null 2>&1 || true' EXIT
         echo "$$GHCR_TOKEN" | docker login ghcr.io -u "$$GHCR_USERNAME" --password-stdin
         # Skip if this commit is already published: the release step's ls-remote
         # guard, for an image. Only a positive answer skips - if the registry
