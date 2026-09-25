@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
 	describeEvent,
+	eventAtMs,
 	fetchAgentActivity,
 	fetchFleet,
 	fetchHistoryMessages,
@@ -128,6 +129,33 @@ describe("relativeAge", () => {
 	});
 });
 
+describe("eventAtMs", () => {
+	const received = 1790335618815;
+
+	it("prefers the agent's own stamp over the hub's receipt", () => {
+		// The hub restart case: the frame is from 11:00:22Z, the hub heard it at
+		// 11:26:58Z, and the table must not claim the turn happened at 11:26.
+		expect(
+			eventAtMs({ lastEventAt: "2026-09-25T11:00:22.507Z", lastEventAtMs: received })
+		).toBe(Date.parse("2026-09-25T11:00:22.507Z"));
+	});
+
+	it("falls back to the receipt when the agent published no stamp", () => {
+		expect(eventAtMs({ lastEventAtMs: received })).toBe(received);
+		expect(eventAtMs({ lastEventAt: "", lastEventAtMs: received })).toBe(received);
+	});
+
+	it("falls back to the receipt when the stamp is unparseable", () => {
+		expect(eventAtMs({ lastEventAt: "whenever", lastEventAtMs: received })).toBe(received);
+	});
+
+	it("reports nothing for an agent that has never published", () => {
+		expect(eventAtMs({ lastEventAt: null, lastEventAtMs: null })).toBeNull();
+		expect(eventAtMs({})).toBeNull();
+		expect(eventAtMs(undefined)).toBeNull();
+	});
+});
+
 describe("stateLabel", () => {
 	it("labels each known state", () => {
 		expect(stateLabel("live")).toBe("live");
@@ -221,6 +249,37 @@ describe("describeEvent", () => {
 		expect(describeEvent({ type: "finished" })).toBe("finished");
 		expect(describeEvent(undefined)).toBe("event");
 	});
+
+	it("spells out a usage frame instead of dumping its counters", () => {
+		expect(describeEvent({ type: "usage", size: 1000000, used: 124864 })).toBe(
+			"context 124864 of 1000000"
+		);
+	});
+
+	it("falls back for a usage frame shaped differently", () => {
+		expect(describeEvent({ type: "usage", used: 5 })).toBe("used=5");
+	});
+
+	it("spells out how a turn finished", () => {
+		expect(
+			describeEvent({
+				type: "finished",
+				contextTokens: 124864,
+				inputTokens: 123827,
+				outputTokens: 1037,
+				stopReason: "end_turn",
+				totalTokens: 124864
+			})
+		).toBe("end_turn · 123827 in / 1037 out · 124864 total");
+	});
+
+	it("says what it can when a finished frame is incomplete", () => {
+		expect(describeEvent({ type: "finished", stopReason: "end_turn" })).toBe("end_turn");
+		expect(describeEvent({ type: "finished", totalTokens: 42 })).toBe("42 total");
+		// Nothing recognisable left: the generic gist still shows what came,
+		// rather than silently rendering the word "finished".
+		expect(describeEvent({ type: "finished", stopReason: null })).toBe("stopReason=null");
+	});
 });
 
 describe("foldActivity", () => {
@@ -305,6 +364,33 @@ describe("foldActivity", () => {
 	it("carries no internal bookkeeping into the render", () => {
 		const lines = foldActivity([entry(1, "thought", { type: "thought", text: "x" })]);
 		expect(lines[0]).not.toHaveProperty("open");
+	});
+
+	it("counts a delta run whose agent published no text", () => {
+		const lines = foldActivity([
+			entry(1, "answer", { type: "answer", deltaBytes: 5 }),
+			entry(2, "answer", { type: "answer", deltaBytes: 6 }),
+			entry(3, "answer", { type: "answer", deltaBytes: 1 })
+		]);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toMatchObject({ type: "answer", text: "", chunks: 3, bytes: 12 });
+	});
+
+	it("counts a delta run that does carry text", () => {
+		const lines = foldActivity([
+			entry(1, "answer", { type: "answer", text: "Hel", deltaBytes: 3 }),
+			entry(2, "answer", { type: "answer", text: "lo", deltaBytes: 2 })
+		]);
+		expect(lines[0]).toMatchObject({ text: "Hello", chunks: 2, bytes: 5 });
+	});
+
+	it("starts the count again when a tool call breaks the run", () => {
+		const lines = foldActivity([
+			entry(1, "answer", { type: "answer", deltaBytes: 5 }),
+			entry(2, "tool_call", { type: "tool_call", id: "c1", title: "shell · ls" }),
+			entry(3, "answer", { type: "answer", deltaBytes: 7 })
+		]);
+		expect(lines.map((line) => line.bytes)).toEqual([5, undefined, 7]);
 	});
 
 	it("survives an empty ring", () => {
