@@ -125,6 +125,13 @@ pub struct AgentView {
     pub session_count: Option<u64>,
     pub activity_enabled: Option<bool>,
     pub last_event_at_ms: Option<u64>,
+    /// The agent's own stamp for that same event. The two differ as soon as a
+    /// tunnel is restored: an agent re-pushes its ring on connect, so the hub
+    /// hears about an hour-old turn this second. Liveness is measured against
+    /// the receipt (see `is_stuck`); this field is what the fleet view shows,
+    /// because "when did it last do something" is the agent's answer, not the
+    /// hub's.
+    pub last_event_at: Option<String>,
     pub last_frame_at_ms: u64,
     pub connected_at_ms: u64,
     pub seconds_since_event: Option<u64>,
@@ -150,6 +157,7 @@ struct Agent {
     connected_at_ms: u64,
     last_frame_at_ms: u64,
     last_event_at_ms: Option<u64>,
+    last_event_at: Option<String>,
     last_seq: Option<u64>,
     event_count: u64,
     ring: VecDeque<ActivityEntry>,
@@ -206,6 +214,7 @@ impl Hub {
                     if agent.hello.boot_id != hello.boot_id {
                         agent.last_seq = None;
                         agent.last_event_at_ms = None;
+                        agent.last_event_at = None;
                         agent.status = AgentStatus::default();
                     }
                     agent.hello = hello;
@@ -224,6 +233,7 @@ impl Hub {
                             connected_at_ms: now,
                             last_frame_at_ms: now,
                             last_event_at_ms: None,
+                            last_event_at: None,
                             last_seq: None,
                             event_count: 0,
                             ring: VecDeque::new(),
@@ -290,6 +300,7 @@ impl Hub {
             }
             agent.last_seq = Some(frame.seq);
             agent.last_event_at_ms = Some(now);
+            agent.last_event_at = entry.at.clone();
             agent.last_frame_at_ms = now;
             agent.event_count += 1;
             agent.ring.push_back(entry.clone());
@@ -473,6 +484,7 @@ fn view(agent: &Agent, now: u64, config: &Config) -> AgentView {
         session_count: agent.status.session_count,
         activity_enabled: agent.status.activity_enabled,
         last_event_at_ms: agent.last_event_at_ms,
+        last_event_at: agent.last_event_at.clone(),
         last_frame_at_ms: agent.last_frame_at_ms,
         connected_at_ms: agent.connected_at_ms,
         seconds_since_event: agent
@@ -574,9 +586,36 @@ mod tests {
         let view = &hub.snapshot(1_100)[0];
         assert_eq!(view.event_count, 1);
         assert_eq!(view.last_event_at_ms, Some(1_100));
+        // The view carries the agent's own stamp as well as the receipt: they
+        // are the same instant here, and only diverge when a tunnel comes back
+        // and the agent re-pushes an older ring.
+        assert_eq!(
+            view.last_event_at.as_deref(),
+            Some("2026-09-20T02:31:07.512Z")
+        );
         assert_eq!(
             hub.recent("a2a-goose-dev").unwrap()[0].event_type,
             "tool_call"
+        );
+    }
+
+    #[test]
+    fn a_re_pushed_ring_keeps_the_agents_own_timestamp() {
+        // The failure this guards: the hub restarts, every agent re-pushes the
+        // ring it was holding, and each frame is *received* now. If the fleet
+        // view reported the receipt, a turn from an hour ago would read as
+        // happening this second.
+        let hub = hub();
+        connect(&hub, "boot-a", 1_000);
+        assert_eq!(
+            hub.record_activity("a2a-goose-dev", activity("boot-a", 1), 3_600_000),
+            RecordOutcome::Accepted
+        );
+        let view = &hub.snapshot(3_600_000)[0];
+        assert_eq!(view.last_event_at_ms, Some(3_600_000));
+        assert_eq!(
+            view.last_event_at.as_deref(),
+            Some("2026-09-20T02:31:07.512Z")
         );
     }
 
