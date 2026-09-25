@@ -405,20 +405,30 @@
 					<th>version</th>
 					<th class="num">in flight</th>
 					<th>last event</th>
-					<th>state</th>
 				</tr>
 			</thead>
 			<tbody>
 				{#each sortedAgents as agent (agent.agentId)}
 					<tr class:selected={selected === agent.agentId} onclick={() => openAgent(agent.agentId)}>
-						<td class="agent">{agent.agentId}</td>
+						<!-- The state is a dot rather than its own column: the chip said
+						     "offline" in as much width as a long agentId needs to be
+						     readable on a phone, and a coloured dot says the same thing
+						     in seven pixels. The word lives in the title/aria-label for
+						     anyone who needs it spelled out. -->
+						<td class="agent">
+							<span
+								class="state-dot {agent.state}"
+								role="img"
+								aria-label={stateLabel(agent.state)}
+								title={stateLabel(agent.state)}
+							></span>{agent.agentId}
+						</td>
 						{#if showKind}
 							<td>{agent.kind}</td>
 						{/if}
 						<td>{agent.agentVersion}</td>
 						<td class="num">{agent.inFlight}</td>
 						<td class="when">{relativeAge(agent.lastEventAtMs, nowMs)}</td>
-						<td><span class="chip {agent.state}">{stateLabel(agent.state)}</span></td>
 					</tr>
 				{/each}
 			</tbody>
@@ -530,6 +540,23 @@
 	td.agent {
 		font-weight: 600;
 		white-space: nowrap;
+	}
+	/* The state column, folded into the agent cell: seven pixels of the same
+	   palette the chip used, so liveness still reads at a glance on a phone. */
+	.state-dot {
+		display: inline-block;
+		width: 7px;
+		height: 7px;
+		margin-right: 6px;
+		border-radius: 50%;
+		vertical-align: middle;
+		background: #94a3b8;
+	}
+	.state-dot.live {
+		background: #34d399;
+	}
+	.state-dot.stuck {
+		background: #fdba74;
 	}
 	tbody tr {
 		cursor: pointer;
