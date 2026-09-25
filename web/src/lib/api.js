@@ -73,6 +73,25 @@ export function relativeAge(atMs, now) {
 }
 
 /**
+ * When an agent last did something, in epoch ms.
+ *
+ * The hub reports both the instant *it heard* about the newest event
+ * (`lastEventAtMs`, which is what liveness and stuck detection are measured
+ * against) and the agent's own stamp for that same frame (`lastEventAt`). The
+ * fleet view wants the second one: after the hub restarts, every agent
+ * re-pushes the ring it was holding, so the receipt would date an hour-old turn
+ * to this second. Falls back to the receipt when the agent published no stamp,
+ * and is null when it has never published anything at all.
+ *
+ * @param {object} agent an agent view from the hub
+ * @returns {number|null}
+ */
+export function eventAtMs(agent) {
+	const stamped = agent?.lastEventAt ? Date.parse(agent.lastEventAt) : Number.NaN;
+	return Number.isFinite(stamped) ? stamped : (agent?.lastEventAtMs ?? null);
+}
+
+/**
  * The human label for a fleet state.
  *
  * @param {string} state
@@ -179,12 +198,30 @@ export async function fetchAgentActivity(agentId, fetchImpl = globalThis.fetch) 
  * operator is better served by seeing a frame they do not recognise than by the
  * view silently agreeing with itself.
  *
+ * The two frame types a turn always ends with are spelled out, because their
+ * payload is a dump of counters and `key=value` for `usage`/`finished` reads as
+ * debugging output rather than as "the turn used 124864 of its 1000000 context
+ * and stopped on end_turn". Everything else keeps the generic fallback, which
+ * is what makes an unfamiliar frame legible instead of invisible.
+ *
  * @param {object} event
  * @returns {string}
  */
 export function describeEvent(event) {
 	if (typeof event?.text === "string") return event.text;
 	const { type, ...rest } = event ?? {};
+	if (type === "usage" && typeof rest.used === "number" && typeof rest.size === "number") {
+		return `context ${rest.used} of ${rest.size}`;
+	}
+	if (type === "finished") {
+		const parts = [];
+		if (rest.stopReason) parts.push(rest.stopReason);
+		if (typeof rest.inputTokens === "number" || typeof rest.outputTokens === "number") {
+			parts.push(`${rest.inputTokens ?? 0} in / ${rest.outputTokens ?? 0} out`);
+		}
+		if (typeof rest.totalTokens === "number") parts.push(`${rest.totalTokens} total`);
+		if (parts.length > 0) return parts.join(" · ");
+	}
 	const detail = Object.entries(rest)
 		.map(([key, value]) => `${key}=${value !== null && typeof value === "object" ? JSON.stringify(value) : value}`)
 		.join(" ");
@@ -205,6 +242,11 @@ export function describeEvent(event) {
  *   - any other frame ends the current text run, so a thought that resumes after
  *     a tool call starts a fresh line rather than reading as one breath.
  *
+ * Each folded text line also carries `chunks` and `bytes`, summed from the
+ * `deltaBytes` the frames published. Some agents stream the shape of a turn
+ * without its words; the counts are then the only thing left to render, and
+ * they keep a folded run from collapsing to a silent blank line.
+ *
  * @param {Array<object>} entries raw entries, oldest first
  * @param {{ limit?: number }} [options] how many trailing lines to keep
  * @returns {Array<object>} folded lines, oldest first
@@ -221,9 +263,18 @@ export function foldActivity(entries, { limit = 120 } = {}) {
 			if (last) last.open = false;
 		};
 		if (type === "thought" || type === "answer") {
+			// Not every agent puts words on this wire: a delta may carry only
+			// `deltaBytes`, so the run folds to a line with `text: ""` and a
+			// count. The view needs that count to say what arrived - an empty
+			// row would read as a bug in the page rather than a choice by the
+			// agent.
+			const text = event.text ?? "";
+			const bytes = typeof event.deltaBytes === "number" ? event.deltaBytes : 0;
 			const last = lines[lines.length - 1];
 			if (last && last.type === type && last.open && last.contextId === (entry.contextId ?? null)) {
-				last.text += event.text ?? "";
+				last.text += text;
+				last.chunks += 1;
+				last.bytes += bytes;
 				last.at = at ?? last.at;
 				continue;
 			}
@@ -231,7 +282,9 @@ export function foldActivity(entries, { limit = 120 } = {}) {
 			lines.push({
 				type,
 				contextId: entry.contextId ?? null,
-				text: event.text ?? "",
+				text,
+				chunks: 1,
+				bytes,
 				at,
 				open: true
 			});

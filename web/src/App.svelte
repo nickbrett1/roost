@@ -1,6 +1,7 @@
 <script>
 	import { onMount } from "svelte";
 	import {
+		eventAtMs,
 		fetchAgentActivity,
 		fetchFleet,
 		fetchHistoryMessages,
@@ -38,6 +39,17 @@
 	let activityError = $state(null);
 	let activity = $derived(foldActivity(activityEntries));
 
+	// How long ago the newest frame in the ring was published: the agent's own
+	// timestamp when it sent one, the hub's receipt when it did not. Without it
+	// the feed reads as "now" - and a ring from an hour ago then looks like a
+	// broken clock rather than an old turn.
+	const feedAge = $derived.by(() => {
+		const newest = activityEntries[activityEntries.length - 1];
+		if (!newest) return null;
+		const stamped = newest.at ? Date.parse(newest.at) : Number.NaN;
+		return relativeAge(Number.isFinite(stamped) ? stamped : newest.receivedAtMs, nowMs);
+	});
+
 	// The hub's ring is bounded (512); mirror that bound so a long-lived view
 	// holds no more than the hub would have sent it anyway.
 	const ACTIVITY_CAP = 512;
@@ -51,6 +63,23 @@
 
 	function clock(at) {
 		return at ? at.slice(11, 19) : "";
+	}
+
+	/// A byte count at phone size. Deltas arrive a token at a time, so the
+	/// numbers are small and get a decimal; anything bigger is rounded.
+	function size(bytes) {
+		if (bytes < 1024) return `${bytes} B`;
+		return `${(bytes / 1024).toFixed(1)} KiB`;
+	}
+
+	/// A folded run of `answer`/`thought` frames whose agent published no text -
+	/// only `deltaBytes` reached the wire. Say what did arrive, because an empty
+	/// row reads as a broken page rather than as an agent's choice.
+	function unspoken(line) {
+		const parts = [`${line.chunks} delta${line.chunks === 1 ? "" : "s"}`];
+		if (line.bytes > 0) parts.push(size(line.bytes));
+		parts.push("text not published");
+		return parts.join(" · ");
 	}
 
 	// The build stamp, baked in at bundle time by vite (`define` in
@@ -198,7 +227,15 @@
 					pushActivity(event.agent_id, event.entry);
 					agents = agents.map((agent) =>
 						agent.agentId === event.agent_id
-							? { ...agent, lastEventAtMs: Date.now(), eventCount: agent.eventCount + 1 }
+							? {
+									...agent,
+									lastEventAtMs: Date.now(),
+									// The table shows the agent's own stamp, so a live frame
+									// has to carry it too - otherwise the row keeps the age
+									// of the previous event until the next snapshot arrives.
+									lastEventAt: event.entry.at ?? agent.lastEventAt,
+									eventCount: agent.eventCount + 1
+								}
 							: agent
 					);
 				}
@@ -225,13 +262,14 @@
 	);
 
 	// The operator's first question is "who is doing something", so the fleet is
-	// ordered by the last event, newest first. An agent that has never published
-	// anything (lastEventAtMs null) sorts to the bottom rather than the top, and
-	// the agentId tiebreak keeps the order stable as the ages tick.
+	// ordered by the last event, newest first - by the same number the column
+	// shows, so the rows are never in an order the ages disagree with. An agent
+	// that has never published anything (null) sorts to the bottom rather than
+	// the top, and the agentId tiebreak keeps the order stable as the ages tick.
 	const sortedAgents = $derived(
 		[...agents].sort((a, b) => {
-			const at = a.lastEventAtMs ?? Number.NEGATIVE_INFINITY;
-			const bt = b.lastEventAtMs ?? Number.NEGATIVE_INFINITY;
+			const at = eventAtMs(a) ?? Number.NEGATIVE_INFINITY;
+			const bt = eventAtMs(b) ?? Number.NEGATIVE_INFINITY;
 			if (bt !== at) return bt - at;
 			return a.agentId.localeCompare(b.agentId);
 		})
@@ -312,6 +350,13 @@
 						{:else if selectedAgent && selectedAgent.inFlight > 0}
 							<span class="busy">in flight</span>
 						{/if}
+						{#if feedAge}
+							<!-- Times are UTC, matching the build stamp, so a feed clock
+							     is never read as the phone's own zone; and the age of the
+							     newest frame is stated here so that a stale ring says so
+							     instead of looking live. -->
+							<span class="note">last frame {feedAge} · times UTC</span>
+						{/if}
 					</h3>
 					{#if activityError}
 						<p class="error">activity unavailable: {activityError}</p>
@@ -321,12 +366,14 @@
 						<ol class="feed">
 							{#each activity as line, i (i)}
 								<li class={line.type}>
-									<span class="at">{clock(line.at)}</span>
+									<span class="at" title={stampTime(line.at)}>{clock(line.at)}</span>
 									<span class="kind">{label(line)}</span>
 									{#if line.status}
 										<span class="status" class:done={line.status === "completed"}>{line.status}</span>
 									{/if}
-									<span class="text">{line.text}</span>
+									<span class="text" class:unspoken={!line.text && line.bytes > 0}>
+										{line.text || (line.bytes > 0 ? unspoken(line) : "")}
+									</span>
 								</li>
 							{/each}
 						</ol>
@@ -428,7 +475,7 @@
 						{/if}
 						<td>{agent.agentVersion}</td>
 						<td class="num">{agent.inFlight}</td>
-						<td class="when">{relativeAge(agent.lastEventAtMs, nowMs)}</td>
+						<td class="when">{relativeAge(eventAtMs(agent), nowMs)}</td>
 					</tr>
 				{/each}
 			</tbody>
@@ -695,6 +742,19 @@
 	.feed .text {
 		flex: 1 1 auto;
 		min-width: 0;
+	}
+	/* Both the panel note and a delta run with no text are meta, not content:
+	   quiet enough to skip, present enough to explain the row. The note keeps
+	   the heading's own dimness; it is a sentence, not a label, so it drops the
+	   uppercase and the letter-spacing. */
+	.note {
+		text-transform: none;
+		letter-spacing: 0;
+		font-weight: 400;
+	}
+	.feed .text.unspoken {
+		font-weight: 400;
+		opacity: 0.6;
 	}
 	.feed li.tool_call .text,
 	.feed li.tool_call_update .text {
