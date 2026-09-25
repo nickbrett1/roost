@@ -61,8 +61,18 @@
 		return line.type.replaceAll("_", " ");
 	}
 
+	/// A frame's instant as a wall clock in the reader's own zone. The wire
+	/// stamps everything UTC, which is right for comparing against a build log
+	/// and wrong for reading: sliced straight out of the ISO string it looked
+	/// four hours off, because nothing said which zone it was. The exact UTC
+	/// instant is on the row's title for when precision matters.
 	function clock(at) {
-		return at ? at.slice(11, 19) : "";
+		const ms = at ? Date.parse(at) : Number.NaN;
+		if (!Number.isFinite(ms)) return "";
+		const when = new Date(ms);
+		return [when.getHours(), when.getMinutes(), when.getSeconds()]
+			.map((part) => String(part).padStart(2, "0"))
+			.join(":");
 	}
 
 	/// A byte count at phone size. Deltas arrive a token at a time, so the
@@ -351,11 +361,11 @@
 							<span class="busy">in flight</span>
 						{/if}
 						{#if feedAge}
-							<!-- Times are UTC, matching the build stamp, so a feed clock
-							     is never read as the phone's own zone; and the age of the
-							     newest frame is stated here so that a stale ring says so
-							     instead of looking live. -->
-							<span class="note">last frame {feedAge} · times UTC</span>
+							<!-- Wall clocks are in the reader's zone (the build stamp is
+							     the one thing on the page that stays UTC, and it says so);
+							     and the age of the newest frame is stated here so that a
+							     stale ring says so instead of looking live. -->
+							<span class="note">last frame {feedAge} · local time</span>
 						{/if}
 					</h3>
 					{#if activityError}
