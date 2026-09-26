@@ -94,13 +94,18 @@ export function eventAtMs(agent) {
 /**
  * The human label for a fleet state.
  *
+ * The `live` state is the tunnel being *up*, not the agent doing anything: an
+ * agent can hold a healthy connection while idle for a day. Calling it "live"
+ * made those two ideas read as one, so it is labelled for what it measures -
+ * the connection.
+ *
  * @param {string} state
  * @returns {string}
  */
 export function stateLabel(state) {
 	if (state === "stuck") return "STUCK";
 	if (state === "offline") return "offline";
-	if (state === "live") return "live";
+	if (state === "live") return "connected";
 	return state ?? "unknown";
 }
 

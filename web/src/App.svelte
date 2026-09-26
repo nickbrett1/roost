@@ -39,16 +39,54 @@
 	let activityError = $state(null);
 	let activity = $derived(foldActivity(activityEntries));
 
-	// How long ago the newest frame in the ring was published: the agent's own
-	// timestamp when it sent one, the hub's receipt when it did not. Without it
-	// the feed reads as "now" - and a ring from an hour ago then looks like a
-	// broken clock rather than an old turn.
-	const feedAge = $derived.by(() => {
+	// The instant of the newest frame in the ring: the agent's own timestamp
+	// when it sent one, the hub's receipt when it did not. Everything below
+	// dates the panel from this, so the ring's clock and its age can never
+	// disagree.
+	const activityAtMs = $derived.by(() => {
 		const newest = activityEntries[activityEntries.length - 1];
 		if (!newest) return null;
 		const stamped = newest.at ? Date.parse(newest.at) : Number.NaN;
-		return relativeAge(Number.isFinite(stamped) ? stamped : newest.receivedAtMs, nowMs);
+		return Number.isFinite(stamped) ? stamped : newest.receivedAtMs;
 	});
+
+	// How long ago that was.
+	const feedAge = $derived(activityAtMs === null ? null : relativeAge(activityAtMs, nowMs));
+
+	// How recent a frame has to be for the panel to read as live. Beyond it the
+	// ring is history - the last turn the agent streamed, however long ago - and
+	// the panel says so instead of calling a day-old turn "live".
+	const ACTIVITY_FRESH_MS = 10 * 60 * 1000;
+
+	// A turn running right now is live whatever the last frame's age; otherwise
+	// the newest frame has to be recent. A connected agent that has been idle
+	// for a day is not live activity, and dressing it up as such is exactly how
+	// an hour-old clock came to look like a broken page.
+	const feedLive = $derived(
+		(selectedAgent?.inFlight ?? 0) > 0 ||
+			(activityAtMs !== null && nowMs - activityAtMs <= ACTIVITY_FRESH_MS)
+	);
+
+	// The newest session on disk. Session stamps arrive as naive local strings
+	// and are read exactly the way the session rows read them, so "newer than
+	// the feed" means the same thing to the note as it does to the list.
+	const newestSessionAtMs = $derived.by(() => {
+		let newest = null;
+		for (const entry of sessions ?? []) {
+			const ms = entry.updatedAt ? Date.parse(entry.updatedAt) : Number.NaN;
+			if (Number.isFinite(ms) && (newest === null || ms > newest)) newest = ms;
+		}
+		return newest;
+	});
+
+	// The confusing case: the agent has work the activity wire never carried,
+	// so "last frame 1d ago" sits beside "session 6h ago". Worth explaining
+	// rather than leaving to look like a stopped clock.
+	const newerWorkInSessions = $derived(
+		activityAtMs !== null &&
+			newestSessionAtMs !== null &&
+			newestSessionAtMs - activityAtMs > 60 * 1000
+	);
 
 	// The hub's ring is bounded (512); mirror that bound so a long-lived view
 	// holds no more than the hub would have sent it anyway.
@@ -315,7 +353,7 @@
 		{:else}
 			<p class="summary">
 				{summary.total} agents
-				{#if summary.live > 0}· {summary.live} live{/if}
+				{#if summary.live > 0}· {summary.live} connected{/if}
 				{#if summary.stuck > 0}· <span class="warn">{summary.stuck} stuck</span>{/if}
 				{#if summary.offline > 0}· {summary.offline} offline{/if}
 			</p>
@@ -352,9 +390,25 @@
 		{:else}
 		<section class="drilldown">
 			<div class="columns">
+				{#snippet feedList()}
+					<ol class="feed">
+						{#each activity as line, i (i)}
+							<li class={line.type}>
+								<span class="at" title={stampTime(line.at)}>{clock(line.at)}</span>
+								<span class="kind">{label(line)}</span>
+								{#if line.status}
+									<span class="status" class:done={line.status === "completed"}>{line.status}</span>
+								{/if}
+								<span class="text" class:unspoken={!line.text && line.bytes > 0}>
+									{line.text || (line.bytes > 0 ? unspoken(line) : "")}
+								</span>
+							</li>
+						{/each}
+					</ol>
+				{/snippet}
 				<div class="live">
 					<h3>
-						live
+						activity
 						{#if selectedAgent && selectedAgent.stuck}
 							<span class="warn">stuck</span>
 						{:else if selectedAgent && selectedAgent.inFlight > 0}
@@ -372,21 +426,26 @@
 						<p class="error">activity unavailable: {activityError}</p>
 					{:else if activity.length === 0}
 						<p class="muted">nothing published yet</p>
+					{:else if feedLive}
+						{@render feedList()}
 					{:else}
-						<ol class="feed">
-							{#each activity as line, i (i)}
-								<li class={line.type}>
-									<span class="at" title={stampTime(line.at)}>{clock(line.at)}</span>
-									<span class="kind">{label(line)}</span>
-									{#if line.status}
-										<span class="status" class:done={line.status === "completed"}>{line.status}</span>
-									{/if}
-									<span class="text" class:unspoken={!line.text && line.bytes > 0}>
-										{line.text || (line.bytes > 0 ? unspoken(line) : "")}
-									</span>
-								</li>
-							{/each}
-						</ol>
+						<!-- The ring is history, not a running turn. Say what it is and
+						     keep it one click away, rather than dressing a day-old turn as
+						     live or hiding it as if it were not there. -->
+						<p class="muted">
+							no streamed activity in the last {Math.round(ACTIVITY_FRESH_MS / 60000)} minutes - this
+							is the agent's last turn, {feedAge}.
+						</p>
+						{#if newerWorkInSessions}
+							<p class="muted">
+								newer work is in <strong>sessions</strong>: the activity wire only carries turns
+								streamed through roost.
+							</p>
+						{/if}
+						<details>
+							<summary>show the last {activity.length} frames</summary>
+							{@render feedList()}
+						</details>
 					{/if}
 				</div>
 
@@ -761,6 +820,19 @@
 		text-transform: none;
 		letter-spacing: 0;
 		font-weight: 400;
+	}
+	/* The gated feed: the frames are kept, but folded away until asked for, so
+	   the drill-down opens on the sessions it should have been read against. */
+	.live details {
+		margin-top: 0.5rem;
+	}
+	.live summary {
+		cursor: pointer;
+		font-size: 11px;
+		opacity: 0.7;
+	}
+	.live summary:hover {
+		opacity: 1;
 	}
 	.feed .text.unspoken {
 		font-weight: 400;

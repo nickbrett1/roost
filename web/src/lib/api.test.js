@@ -158,7 +158,9 @@ describe("eventAtMs", () => {
 
 describe("stateLabel", () => {
 	it("labels each known state", () => {
-		expect(stateLabel("live")).toBe("live");
+		// "live" is the tunnel being up, so it is named for the connection
+		// rather than dressed up as the agent being active.
+		expect(stateLabel("live")).toBe("connected");
 		expect(stateLabel("stuck")).toBe("STUCK");
 		expect(stateLabel("offline")).toBe("offline");
 	});
