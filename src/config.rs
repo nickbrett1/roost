@@ -38,6 +38,14 @@ pub struct Config {
     pub tunnel_idle_ms: Option<u64>,
     /// How long a `request` waits for its `response` before giving up.
     pub request_timeout_ms: u64,
+    /// A home display the hub mirrors for the UI (`ROOST_MIRROR_URL`), e.g.
+    /// `http://nas:3009`. `None` is the default and a normal state: the panel
+    /// simply is not shown.
+    ///
+    /// The mirror lives on the hub rather than in the browser because the
+    /// device's API is cross-origin to the UI and sends no CORS header, so the
+    /// browser cannot read it directly. The hub can.
+    pub mirror_url: Option<String>,
     /// Per-agent credentials, keyed by `agentId`. Empty means authentication is
     /// **off** (§7.1): the tailnet is then the only boundary, which is a choice
     /// an operator makes by not configuring any.
@@ -55,6 +63,7 @@ impl Default for Config {
             auth_off_ack: false,
             tunnel_idle_ms: None,
             request_timeout_ms: 10_000,
+            mirror_url: None,
             agent_tokens: HashMap::new(),
         }
     }
@@ -87,6 +96,13 @@ impl Config {
         }
         if let Some(ms) = read_u64("ROOST_REQUEST_TIMEOUT_MS") {
             config.request_timeout_ms = ms;
+        }
+        if let Ok(url) = env::var("ROOST_MIRROR_URL") {
+            let url = url.trim();
+            // An empty value is "not configured", not a URL that fails later.
+            if !url.is_empty() {
+                config.mirror_url = Some(url.to_string());
+            }
         }
         if let Ok(tokens) = env::var("ROOST_AGENT_TOKENS") {
             config.agent_tokens = parse_agent_tokens(&tokens);

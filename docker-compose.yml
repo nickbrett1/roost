@@ -16,7 +16,16 @@ services:
     ports:
       - "0.0.0.0:3008:3000"
 
-    environment: {}
+    environment:
+      # The home display the fleet page mirrors. `host.docker.internal` is the
+      # NAS itself, where the display publishes port 3009; the `extra_hosts`
+      # entry below is what makes that name resolve from inside the container.
+      # The device's API is not on this compose network, so the published port
+      # is the way in. Set ROOST_MIRROR_URL in .env to point elsewhere, or
+      # remove this line to drop the panel entirely.
+      ROOST_MIRROR_URL: ${ROOST_MIRROR_URL:-http://host.docker.internal:3009}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
       - "homepage.group=Services"
