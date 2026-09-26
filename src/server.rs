@@ -29,10 +29,15 @@ use tokio_stream::wrappers::BroadcastStream;
 use tower_http::services::ServeDir;
 
 use crate::fleet::{now_ms, AgentStatus, Hub, HubEvent, Outbound, PendingMap};
+use crate::httpget::{get_json, join, parse_http_url};
 use crate::protocol::{ClientFrame, Hello};
 
 /// How long an agent has to send its `hello` before the tunnel is dropped.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long the hub waits for the mirrored display to answer. Shorter than the
+/// UI's poll interval so a slow device cannot make the panel lag behind itself.
+const MIRROR_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// Build the hub's router.
 pub fn app(hub: Arc<Hub>) -> Router {
@@ -40,6 +45,7 @@ pub fn app(hub: Arc<Hub>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/api/fleet", get(fleet))
+        .route("/api/mirror", get(mirror))
         .route("/api/agents/{id}", get(agent))
         .route("/api/agents/{id}/activity", get(agent_activity))
         .route("/api/agents/{id}/history/sessions", get(history_sessions))
@@ -94,6 +100,32 @@ async fn healthz() -> Json<Value> {
 
 async fn fleet(State(hub): State<Arc<Hub>>) -> Json<Value> {
     Json(json!({ "agents": hub.snapshot(now_ms()) }))
+}
+
+/// The home display the hub mirrors, if `ROOST_MIRROR_URL` names one.
+///
+/// The device's own API is cross-origin to this UI and sends no CORS header, so
+/// the browser cannot read it; the hub fetches it server-side and hands back the
+/// same JSON under a small envelope. Unconfigured is a normal state
+/// (`configured: false`), and an unreachable mirror is a `200` with `ok: false`
+/// rather than a gateway error: the panel polls this, and "the display is
+/// offline" is something to render, not a transport failure to throw on.
+async fn mirror(State(hub): State<Arc<Hub>>) -> Response {
+    let Some(base) = hub.config().mirror_url.clone() else {
+        return Json(json!({ "configured": false })).into_response();
+    };
+    let state = match parse_http_url(&join(&base, "/api/state")) {
+        Ok(url) => get_json(&url, MIRROR_TIMEOUT).await,
+        Err(error) => Err(error),
+    };
+    match state {
+        Ok(state) => Json(json!({ "configured": true, "ok": true, "url": base, "state": state }))
+            .into_response(),
+        Err(error) => Json(
+            json!({ "configured": true, "ok": false, "url": base, "error": error.to_string() }),
+        )
+        .into_response(),
+    }
 }
 
 async fn agent(State(hub): State<Arc<Hub>>, Path(id): Path<String>) -> Response {

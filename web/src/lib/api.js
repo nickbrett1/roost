@@ -356,3 +356,81 @@ export function foldActivity(entries, { limit = 120 } = {}) {
 	for (const line of kept) delete line.open;
 	return kept;
 }
+
+/**
+ * The home display the hub mirrors, if one is configured.
+ *
+ * The device's own API is cross-origin to this UI and sends no CORS header, so
+ * the browser cannot read it; the hub fetches it server-side and relays the
+ * JSON. `configured: false` is a normal state — the panel simply is not drawn.
+ *
+ * @param {typeof fetch} [fetchImpl] injection point for tests
+ * @returns {Promise<{configured: boolean, ok?: boolean, url?: string|null, state?: object|null, error?: string|null}>}
+ */
+export async function fetchMirror(fetchImpl = globalThis.fetch) {
+	const body = await getJson(fetchImpl, "/api/mirror");
+	if (!body?.configured) return { configured: false };
+	return {
+		configured: true,
+		ok: body.ok === true,
+		url: body.url ?? null,
+		state: body.state ?? null,
+		error: body.error ?? null
+	};
+}
+
+/** How the device's state names read to a person. */
+const MIRROR_STATE_WORDS = {
+	ambient: "Ambient",
+	prompt: "Prompting",
+	countdown: "Counting down",
+	handoff: "Handing off"
+};
+
+/**
+ * The device's `remaining_s` as `m:ss`, or null when there is no countdown.
+ *
+ * @param {number|null|undefined} seconds
+ * @returns {string|null}
+ */
+export function formatCountdown(seconds) {
+	if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return null;
+	const whole = Math.floor(seconds);
+	return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+}
+
+/**
+ * Reduce the mirrored state document to what the panel draws.
+ *
+ * The device reports what it is *showing* as a logical state — the active
+ * routine and its artwork, a state word, and the board's own countdown — never
+ * as pixels, so this is the whole of what can be mirrored. Returns null when
+ * there is nothing to draw (no mirror, or no snapshot yet).
+ *
+ * @param {{configured?: boolean, state?: object|null}|null} mirror
+ */
+export function mirrorView(mirror) {
+	const panel = mirror?.state?.panel;
+	if (!mirror?.configured || !panel) return null;
+	const routines = Array.isArray(mirror.state.routines) ? mirror.state.routines : [];
+	const active = routines.find((routine) => routine.id === panel.routine) ?? null;
+	return {
+		online: panel.online === true,
+		state: panel.state ?? null,
+		stateWord: MIRROR_STATE_WORDS[panel.state] ?? panel.state ?? "unknown",
+		routineId: panel.routine ?? null,
+		headline: active?.label ?? null,
+		artwork: active?.artwork ?? null,
+		countdown: formatCountdown(panel.remaining_s),
+		routines: routines.map((routine) => ({
+			id: routine.id,
+			label: routine.label,
+			artwork: routine.artwork,
+			active: routine.id === panel.routine
+		})),
+		firmware: panel.fw ?? null,
+		signal: panel.rssi ?? null,
+		uptime: panel.uptime_s ?? null,
+		seen: panel.last_seen_s ?? null
+	};
+}

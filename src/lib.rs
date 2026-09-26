@@ -7,5 +7,6 @@
 pub mod config;
 pub mod fake_agent;
 pub mod fleet;
+pub mod httpget;
 pub mod protocol;
 pub mod server;
