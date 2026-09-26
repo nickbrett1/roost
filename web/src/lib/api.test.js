@@ -9,6 +9,7 @@ import {
 	fleetSummary,
 	foldActivity,
 	openEventStream,
+	parseStamp,
 	relativeAge,
 	searchHistory,
 	stateLabel
@@ -168,6 +169,31 @@ describe("stateLabel", () => {
 	it("passes an unknown state through and handles undefined", () => {
 		expect(stateLabel("rebooting")).toBe("rebooting");
 		expect(stateLabel(undefined)).toBe("unknown");
+	});
+});
+
+describe("parseStamp", () => {
+	it("reads a naive history stamp as UTC, not the reader's zone", () => {
+		expect(parseStamp("2026-09-26 16:21:29")).toBe(Date.parse("2026-09-26T16:21:29Z"));
+	});
+
+	it("leaves a zone-aware stamp alone", () => {
+		expect(parseStamp("2026-09-25T11:00:22.507Z")).toBe(
+			Date.parse("2026-09-25T11:00:22.507Z")
+		);
+		expect(parseStamp("2026-09-25T11:00:22+01:00")).toBe(
+			Date.parse("2026-09-25T11:00:22+01:00")
+		);
+	});
+
+	it("treats a bare date as midnight UTC", () => {
+		expect(parseStamp("2026-09-26")).toBe(Date.parse("2026-09-26T00:00:00Z"));
+	});
+
+	it("returns null when there is nothing to read", () => {
+		expect(parseStamp(null)).toBeNull();
+		expect(parseStamp("")).toBeNull();
+		expect(parseStamp("whenever")).toBeNull();
 	});
 });
 

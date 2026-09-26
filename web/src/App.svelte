@@ -9,6 +9,7 @@
 		fleetSummary,
 		foldActivity,
 		openEventStream,
+		parseStamp,
 		relativeAge,
 		searchHistory,
 		stateLabel
@@ -67,14 +68,14 @@
 			(activityAtMs !== null && nowMs - activityAtMs <= ACTIVITY_FRESH_MS)
 	);
 
-	// The newest session on disk. Session stamps arrive as naive local strings
-	// and are read exactly the way the session rows read them, so "newer than
-	// the feed" means the same thing to the note as it does to the list.
+	// The newest session on disk. Session stamps arrive naive and are read as
+	// the UTC they are (see parseStamp), so "newer than the feed" means the
+	// same thing to the note as it does to the list.
 	const newestSessionAtMs = $derived.by(() => {
 		let newest = null;
 		for (const entry of sessions ?? []) {
-			const ms = entry.updatedAt ? Date.parse(entry.updatedAt) : Number.NaN;
-			if (Number.isFinite(ms) && (newest === null || ms > newest)) newest = ms;
+			const ms = parseStamp(entry.updatedAt);
+			if (ms !== null && (newest === null || ms > newest)) newest = ms;
 		}
 		return newest;
 	});
@@ -244,10 +245,66 @@
 		}
 	}
 
+	// The agent pages history two messages at a time and only forward, so a
+	// session's first page is its opening prompt - which is how a 269-message
+	// conversation opened on two lines and read as empty. Aim for this many
+	// messages, and start that far from the end.
+	const TRANSCRIPT_WINDOW = 20;
+
+	/// The session's message count, from whichever list already has it. Null
+	/// when the session was deep-linked before its list arrived.
+	function sessionCountFor(id) {
+		const row = [...(sessions ?? []), ...(matches ?? [])].find(
+			(entry) => entry.sessionId === id
+		);
+		return typeof row?.messageCount === "number" ? row.messageCount : null;
+	}
+
+	/// A run of messages from `start`, following the agent's forward-only
+	/// cursors until the window is full or the session runs out. Cursors are
+	/// message offsets, so seeking to the tail is one cursor, not a walk.
+	async function fetchWindow(agentId, id, start) {
+		let cursor = start > 0 ? String(start) : null;
+		const messages = [];
+		let nextCursor = null;
+		for (let page = 0; page < TRANSCRIPT_WINDOW; page += 1) {
+			const got = await fetchHistoryMessages(agentId, id, cursor ? { cursor } : {});
+			if (got.messages.length === 0) break;
+			messages.push(...got.messages);
+			nextCursor = got.nextCursor;
+			if (!nextCursor) break;
+			cursor = nextCursor;
+		}
+		return { messages, nextCursor };
+	}
+
 	async function loadTranscript(agentId, id) {
 		try {
-			const page = await fetchHistoryMessages(agentId, id, { limit: 20 });
-			transcript = { sessionId: id, ...page };
+			const count = sessionCountFor(id);
+			const start = count === null ? 0 : Math.max(0, count - TRANSCRIPT_WINDOW);
+			let window = await fetchWindow(agentId, id, start);
+			// A seek the agent did not honour must not read as an empty session.
+			if (window.messages.length === 0 && start > 0) {
+				window = await fetchWindow(agentId, id, 0);
+			}
+			transcript = { sessionId: id, ...window };
+			historyError = null;
+		} catch (cause) {
+			historyError = cause.message;
+		}
+	}
+
+	/// Reach back for the messages before the window, keeping what is on screen
+	/// where it is.
+	async function loadEarlier() {
+		if (!selected || !sessionId || !transcript) return;
+		const first = transcript.messages[0]?.index ?? 0;
+		if (first <= 0) return;
+		try {
+			const start = Math.max(0, first - TRANSCRIPT_WINDOW);
+			const earlier = await fetchWindow(selected, sessionId, start);
+			const head = earlier.messages.filter((message) => (message.index ?? 0) < first);
+			transcript = { ...transcript, messages: [...head, ...transcript.messages] };
 			historyError = null;
 		} catch (cause) {
 			historyError = cause.message;
@@ -375,8 +432,15 @@
 					<p class="error">history unavailable: {historyError}</p>
 				{:else if transcript === null}
 					<p class="muted">loading…</p>
+				{:else if transcript.messages.length === 0}
+					<p class="muted">no messages in this session</p>
 				{:else}
-					{#each transcript.messages as message, i (i)}
+					{#if (transcript.messages[0]?.index ?? 0) > 0}
+						<p>
+							<button onclick={loadEarlier}>load earlier messages</button>
+						</p>
+					{/if}
+					{#each transcript.messages as message, i (message.index ?? i)}
 						<p class="message">
 							<span class="role">{message.role}</span>
 							{message.text}
@@ -496,7 +560,7 @@
 									</button>
 									<span class="muted">
 										{session.messageCount} messages · {session.tokens} tokens · {relativeAge(
-											Date.parse(session.updatedAt),
+											parseStamp(session.updatedAt),
 											nowMs
 										)}
 									</span>
