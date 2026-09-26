@@ -11,7 +11,9 @@
 		openEventStream,
 		parseStamp,
 		relativeAge,
+		roleLabel,
 		searchHistory,
+		spokenMessages,
 		stateLabel
 	} from "./lib/api.js";
 	import { FLEET_HASH, agentHash, parseRoute, sessionHash } from "./lib/route.js";
@@ -31,6 +33,13 @@
 	let sessions = $state(null);
 	let matches = $state(null);
 	let transcript = $state(null);
+
+	// History carries every turn, tool calls and tool results included, and
+	// those steps have no words: drawn as-is they are a run of blank rows under
+	// a bare role. The transcript is the conversation, so it draws the messages
+	// that have text. The raw list stays whole because paging counts messages,
+	// not utterances.
+	const spoken = $derived(spokenMessages(transcript?.messages));
 
 	// The live turn view (memo §6.3). Activity does not come from history: the
 	// hub already holds the frames it was pushed, so this opens populated and
@@ -440,12 +449,16 @@
 							<button onclick={loadEarlier}>load earlier messages</button>
 						</p>
 					{/if}
-					{#each transcript.messages as message, i (message.index ?? i)}
-						<p class="message">
-							<span class="role">{message.role}</span>
-							{message.text}
-						</p>
-					{/each}
+					{#if spoken.length === 0}
+						<p class="muted">no messages with text in this window</p>
+					{:else}
+						{#each spoken as message, i (message.index ?? i)}
+							<p class="message">
+								<span class="role">{roleLabel(message.role)}</span>
+								{message.text}
+							</p>
+						{/each}
+					{/if}
 					{#if transcript.nextCursor}
 						<p class="muted">more messages available</p>
 					{/if}

@@ -134,6 +134,42 @@ export function stateLabel(state) {
 	return state ?? "unknown";
 }
 
+/**
+ * The human label for a transcript role.
+ *
+ * History messages carry the wire's own role names, where the model's turns are
+ * `assistant`. roost names that actor an *agent* everywhere else - the fleet,
+ * the activity feed - so the transcript uses the same word rather than
+ * switching vocabulary one view in. Other roles (`user`, `tool`) are passed
+ * through unchanged.
+ *
+ * @param {string} role
+ * @returns {string}
+ */
+export function roleLabel(role) {
+	if (role === "assistant") return "agent";
+	return role ?? "unknown";
+}
+
+/**
+ * The messages in a transcript that have something to say.
+ *
+ * A session's history is every turn, tool calls and tool results included, and
+ * those steps carry a role but no words. Drawn as-is they are a run of blank
+ * rows under a bare role chip, which reads as a broken page rather than a
+ * choice by the agent. The transcript shows the conversation, so it draws the
+ * messages with text; the raw list is kept whole because paging counts
+ * messages, not utterances.
+ *
+ * @param {Array<object>} [messages]
+ * @returns {Array<object>}
+ */
+export function spokenMessages(messages) {
+	return (messages ?? []).filter(
+		(message) => typeof message?.text === "string" && message.text.trim() !== ""
+	);
+}
+
 /** Shared JSON GET that raises on a non-2xx response. */
 async function getJson(fetchImpl, path) {
 	const response = await fetchImpl(path);

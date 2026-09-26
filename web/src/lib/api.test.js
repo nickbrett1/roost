@@ -11,7 +11,9 @@ import {
 	openEventStream,
 	parseStamp,
 	relativeAge,
+	roleLabel,
 	searchHistory,
+	spokenMessages,
 	stateLabel
 } from "./api.js";
 
@@ -169,6 +171,41 @@ describe("stateLabel", () => {
 	it("passes an unknown state through and handles undefined", () => {
 		expect(stateLabel("rebooting")).toBe("rebooting");
 		expect(stateLabel(undefined)).toBe("unknown");
+	});
+});
+
+describe("roleLabel", () => {
+	it("names the assistant role the way the rest of the view does", () => {
+		expect(roleLabel("assistant")).toBe("agent");
+	});
+
+	it("passes other roles through and handles a missing one", () => {
+		expect(roleLabel("user")).toBe("user");
+		expect(roleLabel("tool")).toBe("tool");
+		expect(roleLabel(undefined)).toBe("unknown");
+	});
+});
+
+describe("spokenMessages", () => {
+	it("keeps a message that has text and drops the turn that has none", () => {
+		const messages = [
+			{ index: 0, role: "user", text: "Add history." },
+			{ index: 1, role: "assistant", text: "" },
+			{ index: 2, role: "tool", text: "Read src/main.rs" },
+			{ index: 3, role: "user", text: "" }
+		];
+		expect(spokenMessages(messages)).toEqual([messages[0], messages[2]]);
+	});
+
+	it("treats whitespace-only text as no text", () => {
+		const messages = [{ index: 0, role: "assistant", text: "  \n\t " }];
+		expect(spokenMessages(messages)).toEqual([]);
+	});
+
+	it("handles a missing text field and no list at all", () => {
+		expect(spokenMessages([{ index: 0, role: "tool" }])).toEqual([]);
+		expect(spokenMessages(undefined)).toEqual([]);
+		expect(spokenMessages(null)).toEqual([]);
 	});
 });
 
