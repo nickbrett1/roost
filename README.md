@@ -58,16 +58,6 @@ Then open <http://127.0.0.1:3000/>. Configuration is environment-driven:
 `PORT`, `ROOST_STATIC_DIR`, `ROOST_STUCK_AFTER_MS`, `ROOST_STATUS_POLL_MS`,
 `ROOST_RING_SIZE`, `ROOST_TUNNEL_IDLE_MS`, `ROOST_AUTH_OFF_ACK`. The fake agent reads `ROOST_HUB_URL`.
 
-`ROOST_MIRROR_URL` names a home display the fleet page mirrors, e.g.
-`ROOST_MIRROR_URL=http://nas:3009`. When it is set, the hub fetches that device's
-`/api/state` and the UI draws a read-only panel in the device's own colours: the
-active routine and its artwork, the state word, and the board's own countdown.
-The fetch is server-side because the device's API is cross-origin to the UI and
-sends no CORS header, so a browser could not read it directly. It mirrors only
-what the device *reports* — a logical state, never pixels — and it never drives
-the device. Unset (the default) means no panel is drawn, which is a normal state
-rather than an error.
-
 `ROOST_AGENT_TOKENS` gates the agent tunnel (§7.1). It is a comma-separated map
 of `agentId=token`, e.g.:
 

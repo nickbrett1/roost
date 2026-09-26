@@ -6,10 +6,8 @@
 		fetchFleet,
 		fetchHistoryMessages,
 		fetchHistorySessions,
-		fetchMirror,
 		fleetSummary,
 		foldActivity,
-		mirrorView,
 		openEventStream,
 		parseStamp,
 		relativeAge,
@@ -41,13 +39,6 @@
 	let activityEntries = $state([]);
 	let activityError = $state(null);
 	let activity = $derived(foldActivity(activityEntries));
-
-	// The home display the hub mirrors, if one is configured (ROOST_MIRROR_URL).
-	// It is a *view* of the device, never a control: the hub fetches the device's
-	// API (which the browser cannot reach cross-origin) and relays the JSON.
-	let mirror = $state(null);
-	let mirrorError = $state(null);
-	const panel = $derived(mirrorView(mirror));
 
 	// The instant of the newest frame in the ring: the agent's own timestamp
 	// when it sent one, the hub's receipt when it did not. Everything below
@@ -130,16 +121,6 @@
 		return `${(bytes / 1024).toFixed(1)} KiB`;
 	}
 
-	/// A board's uptime at phone size: days once it has been up a day, hours
-	/// otherwise. Rounding down, because "up 2d 3h" is what a glance wants.
-	function uptime(seconds) {
-		if (typeof seconds !== "number" || !Number.isFinite(seconds)) return null;
-		const days = Math.floor(seconds / 86400);
-		const hours = Math.floor((seconds % 86400) / 3600);
-		if (days > 0) return `${days}d ${hours}h`;
-		return `${hours}h ${Math.floor((seconds % 3600) / 60)}m`;
-	}
-
 	/// A folded run of `answer`/`thought` frames whose agent published no text -
 	/// only `deltaBytes` reached the wire. Say what did arrive, because an empty
 	/// row reads as a broken page rather than as an agent's choice.
@@ -177,31 +158,6 @@
 		} catch (cause) {
 			error = cause.message;
 		}
-	}
-
-	/// How long to wait between panel polls. The device's own UI polls its API
-	/// every two seconds, so matching that keeps the mirror as live as the wall
-	/// tile. With no display configured there is nothing to be live about, so it
-	/// backs off to a slow re-check that picks one up if it appears.
-	const MIRROR_POLL_MS = 2_000;
-	const MIRROR_IDLE_POLL_MS = 30_000;
-	let mirrorTimer = null;
-
-	async function loadMirror() {
-		try {
-			mirror = await fetchMirror();
-			mirrorError = null;
-		} catch (cause) {
-			mirrorError = cause.message;
-		}
-	}
-
-	/// Poll on a self-rescheduling timer rather than a fixed interval: the gap
-	/// then depends on what the last answer said, and a slow device cannot pile
-	/// requests up behind it.
-	async function pollMirror() {
-		await loadMirror();
-		mirrorTimer = setTimeout(pollMirror, mirror?.configured ? MIRROR_POLL_MS : MIRROR_IDLE_POLL_MS);
 	}
 
 	// The drill-down is its own view, not a panel hung below the table: on a
@@ -363,7 +319,6 @@
 
 	onMount(() => {
 		load();
-		pollMirror();
 		syncFromHash();
 		window.addEventListener("hashchange", syncFromHash);
 
@@ -402,7 +357,6 @@
 		return () => {
 			close();
 			clearInterval(tick);
-			clearTimeout(mirrorTimer);
 			window.removeEventListener("hashchange", syncFromHash);
 		};
 	});
@@ -466,45 +420,6 @@
 
 	{#if error}
 		<p class="error">Could not reach the hub API: {error}</p>
-	{/if}
-
-	<!-- The mirrored home display. It sits above the fleet because it is the one
-	     thing here that is a *place* rather than a process, and it is drawn in the
-	     device's own colours so it is unmistakably a window onto that panel and
-	     not another roost card. Read-only: it mirrors, it cannot drive. -->
-	{#if !selected}
-		{#if mirrorError}
-			<p class="error">Could not read the panel: {mirrorError}</p>
-		{:else if mirror?.configured && !mirror.ok}
-			<p class="muted">home display unreachable at {mirror.url}: {mirror.error}</p>
-		{:else if panel}
-			<section class="panel" data-online={panel.online} data-state={panel.state}>
-				<div class="matrix" role="img" aria-label={`Panel: ${panel.stateWord}${panel.headline ? `, ${panel.headline}` : ""}${panel.countdown ? `, ${panel.countdown} remaining` : ""}`}>
-					<div class="face">
-						{#if panel.artwork}<span class="art" aria-hidden="true">{panel.artwork}</span>{/if}
-						{#if panel.headline}<p class="headline">{panel.headline}</p>{/if}
-						{#if panel.countdown}<p class="countdown">{panel.countdown}</p>{/if}
-						<p class="stateword">{panel.stateWord}</p>
-					</div>
-					<ul class="chips">
-						{#each panel.routines as routine (routine.id)}
-							<li class="chip" class:active={routine.active} title={routine.label}>
-								<span class="art" aria-hidden="true">{routine.artwork}</span>
-								<span class="label">{routine.label}</span>
-							</li>
-						{/each}
-					</ul>
-				</div>
-				<p class="facts">
-					<span class="badge" class:off={!panel.online}>{panel.online ? "online" : "offline"}</span>
-					{#if panel.firmware}fw {panel.firmware}{/if}
-					{#if panel.signal !== null}· signal {panel.signal} dBm{/if}
-					{#if uptime(panel.uptime)}· up {uptime(panel.uptime)}{/if}
-					{#if panel.seen !== null}· seen {panel.seen}s ago{/if}
-					<span class="origin">mirror of {mirror.url}</span>
-				</p>
-			</section>
-		{/if}
 	{/if}
 
 	{#if selected}
@@ -1031,123 +946,6 @@
 		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 	}
 	.build .subject {
-		overflow-wrap: anywhere;
-	}
-
-	/* The mirrored home display.
-	   Everything inside `.panel` is the *device's* palette (--c-bg #0b0e0d,
-	   green #34c96a, on-green #08100b, muted #a7b1ac, radius 12) rather than
-	   roost's slate: the point is that this block looks like the thing on the
-	   wall, not like another card in this page. The dot grid is the LED matrix
-	   the numbers are drawn on. */
-	.panel {
-		background: #0b0e0d;
-		border: 1px solid rgba(52, 201, 106, 0.25);
-		border-radius: 12px;
-		padding: 0.75rem;
-		margin-bottom: 1rem;
-	}
-	.panel[data-online="false"] {
-		border-color: rgba(226, 69, 58, 0.4);
-	}
-	.panel .matrix {
-		/* A 53x11 LED panel: near-black ground with a faint dot pitch, so the
-		   content sits on the matrix rather than on a flat card. */
-		background-color: #0b0e0d;
-		background-image: radial-gradient(rgba(167, 177, 172, 0.16) 0.5px, transparent 0.5px);
-		background-size: 4px 4px;
-		border-radius: 10px;
-		padding: 0.6rem 0.7rem;
-	}
-	.panel .face {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 2px;
-		text-align: center;
-	}
-	.panel .art {
-		font-size: 2rem;
-		line-height: 1;
-	}
-	.panel .headline {
-		margin: 0;
-		font-size: 1.5rem;
-		font-weight: 700;
-		line-height: 1.05;
-		color: #34c96a;
-		/* The colour the device lights for "go"; a soft glow reads as an LED
-		   rather than as green text. */
-		text-shadow: 0 0 12px rgba(52, 201, 106, 0.45);
-	}
-	.panel .countdown {
-		margin: 0;
-		font-size: 1.9rem;
-		font-variant-numeric: tabular-nums;
-		color: #eef3f0;
-	}
-	.panel .stateword {
-		margin: 0;
-		font-size: 0.7rem;
-		font-weight: 600;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		color: #a7b1ac;
-	}
-	.panel .chips {
-		display: grid;
-		grid-template-columns: repeat(3, 1fr);
-		gap: 0.5rem;
-		margin: 0.6rem 0 0;
-		padding: 0;
-		list-style: none;
-	}
-	.panel .chip {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		justify-content: center;
-		gap: 2px;
-		padding: 6px;
-		border-radius: 12px;
-		background: #171b1a;
-		color: #a7b1ac;
-		opacity: 0.5;
-	}
-	.panel .chip.active {
-		background: #34c96a;
-		color: #08100b;
-		opacity: 1;
-	}
-	.panel .chip .art {
-		font-size: 1.4rem;
-	}
-	.panel .chip .label {
-		font-size: 0.7rem;
-		font-weight: 600;
-	}
-	.panel .facts {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: baseline;
-		gap: 0.35rem;
-		margin: 0.6rem 0 0;
-		font-size: 11px;
-		color: #a7b1ac;
-	}
-	.panel .badge {
-		font-size: 10px;
-		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		color: #34c96a;
-	}
-	.panel .badge.off {
-		color: #e2453a;
-	}
-	.panel .origin {
-		margin-left: auto;
-		opacity: 0.6;
 		overflow-wrap: anywhere;
 	}
 </style>

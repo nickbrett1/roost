@@ -6,11 +6,8 @@ import {
 	fetchFleet,
 	fetchHistoryMessages,
 	fetchHistorySessions,
-	fetchMirror,
 	fleetSummary,
 	foldActivity,
-	formatCountdown,
-	mirrorView,
 	openEventStream,
 	parseStamp,
 	relativeAge,
@@ -426,119 +423,5 @@ describe("foldActivity", () => {
 
 	it("survives an empty ring", () => {
 		expect(foldActivity([])).toEqual([]);
-	});
-});
-
-describe("fetchMirror", () => {
-	it("relays the display's state when the hub has one configured", async () => {
-		const state = { panel: { state: "countdown" }, routines: [] };
-		const fetchImpl = vi.fn(async () => ({
-			ok: true,
-			json: async () => ({ configured: true, ok: true, url: "http://nas:3009", state })
-		}));
-		await expect(fetchMirror(fetchImpl)).resolves.toEqual({
-			configured: true,
-			ok: true,
-			url: "http://nas:3009",
-			state,
-			error: null
-		});
-		expect(fetchImpl).toHaveBeenCalledWith("/api/mirror");
-	});
-
-	it("says so plainly when no display is configured", async () => {
-		const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => ({ configured: false }) }));
-		await expect(fetchMirror(fetchImpl)).resolves.toEqual({ configured: false });
-	});
-
-	it("carries a device that stopped answering as a state, not a throw", async () => {
-		const fetchImpl = vi.fn(async () => ({
-			ok: true,
-			json: async () => ({
-				configured: true,
-				ok: false,
-				url: "http://nas:3009",
-				error: "Connection refused (os error 111)"
-			})
-		}));
-		await expect(fetchMirror(fetchImpl)).resolves.toMatchObject({
-			configured: true,
-			ok: false,
-			error: "Connection refused (os error 111)"
-		});
-	});
-});
-
-describe("formatCountdown", () => {
-	it("renders the board's countdown as m:ss", () => {
-		expect(formatCountdown(155)).toBe("2:35");
-		expect(formatCountdown(9)).toBe("0:09");
-		expect(formatCountdown(0)).toBe("0:00");
-	});
-
-	it("has nothing to say without a countdown", () => {
-		for (const value of [null, undefined, -1, Number.NaN, "60"]) {
-			expect(formatCountdown(value)).toBeNull();
-		}
-	});
-});
-
-describe("mirrorView", () => {
-	const state = {
-		panel: {
-			state: "countdown",
-			routine: "bathtime",
-			remaining_s: 155,
-			fw: "0.1.27",
-			rssi: -60,
-			uptime_s: 7146,
-			last_seen_s: 1,
-			online: true
-		},
-		routines: [
-			{ id: "bathtime", label: "Bathtime", artwork: "🦆" },
-			{ id: "booktime", label: "Booktime", artwork: "📖" }
-		]
-	};
-
-	it("draws the active routine, its artwork and the board's countdown", () => {
-		expect(mirrorView({ configured: true, state })).toMatchObject({
-			online: true,
-			stateWord: "Counting down",
-			routineId: "bathtime",
-			headline: "Bathtime",
-			artwork: "🦆",
-			countdown: "2:35",
-			firmware: "0.1.27"
-		});
-	});
-
-	it("marks which routine chip is lit", () => {
-		const view = mirrorView({ configured: true, state });
-		expect(view.routines).toEqual([
-			{ id: "bathtime", label: "Bathtime", artwork: "🦆", active: true },
-			{ id: "booktime", label: "Booktime", artwork: "📖", active: false }
-		]);
-	});
-
-	it("has nothing to draw without a mirror or a snapshot", () => {
-		expect(mirrorView(null)).toBeNull();
-		expect(mirrorView({ configured: false })).toBeNull();
-		expect(mirrorView({ configured: true, state: null })).toBeNull();
-		expect(mirrorView({ configured: true, state: {} })).toBeNull();
-	});
-
-	it("still draws a board that is between routines", () => {
-		const view = mirrorView({
-			configured: true,
-			state: { panel: { state: "ambient", online: false }, routines: [] }
-		});
-		expect(view).toMatchObject({
-			online: false,
-			stateWord: "Ambient",
-			headline: null,
-			artwork: null,
-			countdown: null
-		});
 	});
 });
