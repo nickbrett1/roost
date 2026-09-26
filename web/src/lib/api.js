@@ -92,6 +92,31 @@ export function eventAtMs(agent) {
 }
 
 /**
+ * A history stamp as epoch ms.
+ *
+ * The two sources disagree about zones. The activity wire is zone-aware ISO
+ * (`...Z`, `+00:00`); history stamps are naive UTC (`2026-09-26 16:21:29`)
+ * with no zone on them at all. `Date.parse` reads a naive stamp as the
+ * *browser's* local time, so with the reader four hours behind UTC a session
+ * updated minutes ago displayed as "0s ago" - in the future, and clamped. An
+ * unzoned stamp here is UTC, because that is what the agent writes.
+ *
+ * @param {string|null|undefined} value
+ * @returns {number|null}
+ */
+export function parseStamp(value) {
+	if (!value) return null;
+	const text = String(value).trim();
+	// Naive: no trailing zone designator for the parser to trust.
+	const naive = /^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?$/.test(text);
+	const iso = naive
+		? `${text.replace(" ", "T")}${text.length <= 10 ? "T00:00:00Z" : "Z"}`
+		: text;
+	const ms = Date.parse(iso);
+	return Number.isFinite(ms) ? ms : null;
+}
+
+/**
  * The human label for a fleet state.
  *
  * The `live` state is the tunnel being *up*, not the agent doing anything: an
