@@ -280,6 +280,26 @@ describe("history helpers", () => {
 		const fetchImpl = async () => ({ ok: false, status: 503 });
 		await expect(fetchHistorySessions("a", {}, fetchImpl)).rejects.toThrow("503");
 	});
+
+	it("retries once through a transient tunnel blip", async () => {
+		const fetchImpl = vi
+			.fn()
+			.mockResolvedValueOnce({ ok: false, status: 502 })
+			.mockResolvedValueOnce({ ok: true, json: async () => ({ body: { sessions: [] } }) });
+		await expect(fetchHistorySessions("a", {}, fetchImpl)).resolves.toEqual([]);
+		expect(fetchImpl).toHaveBeenCalledTimes(2);
+	});
+
+	it("keeps the hub's reason when it cannot retry out of it", async () => {
+		const fetchImpl = async () => ({
+			ok: false,
+			status: 502,
+			json: async () => ({ error: "agent_error", message: "history.search: timed out" })
+		});
+		await expect(fetchHistorySessions("a", {}, fetchImpl)).rejects.toThrow(
+			"request failed: 502: history.search: timed out"
+		);
+	});
 });
 
 describe("fetchAgentActivity", () => {
