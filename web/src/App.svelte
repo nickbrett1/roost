@@ -155,17 +155,75 @@
 		return line.bytes > 0 ? `${size(line.bytes)} of output` : "output";
 	}
 
-	/// A session stamp as a local "YYYY-MM-DD HH:MM" for the sessions table.
-	/// Local, not UTC: this is read as "when did that sitting happen", next to
-	/// the durations, so it belongs in the reader's own zone.
-	function whenStamp(value) {
+	/// A session stamp as a local time of day, "HH:MM". The date is not repeated
+	/// in every row: a phone has no width for it, and most rows share a day - the
+	/// day is stated once, on its own spanning row (see sessionDays).
+	function timeOf(value) {
 		const ms = parseStamp(value);
 		if (ms === null) return "—";
 		const when = new Date(ms);
 		const pad = (part) => String(part).padStart(2, "0");
-		return `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())} ${pad(
-			when.getHours()
-		)}:${pad(when.getMinutes())}`;
+		return `${pad(when.getHours())}:${pad(when.getMinutes())}`;
+	}
+
+	/// The sessions, newest first, folded into one group per local calendar day.
+	///
+	/// The list arrives newest-first and a Map keeps insertion order, so the days
+	/// come out newest-first too and the order inside a day is the list's own.
+	/// A session with no usable stamp falls into a final, undated group rather
+	/// than being dropped.
+	const sessionDays = $derived.by(() => {
+		const groups = new Map();
+		for (const session of sessions ?? []) {
+			const ms = parseStamp(session.createdAt) ?? parseStamp(session.updatedAt);
+			const key = ms === null ? "" : dayKey(ms);
+			let group = groups.get(key);
+			if (!group) {
+				group = { key, label: ms === null ? "undated" : dayLabel(ms), sessions: [] };
+				groups.set(key, group);
+			}
+			group.sessions.push(session);
+		}
+		return [...groups.values()];
+	});
+
+	/// A local calendar day as a grouping key. Local, like the times beside it -
+	/// grouping by UTC while printing local times would put a late-evening row
+	/// under the wrong day.
+	function dayKey(ms) {
+		const when = new Date(ms);
+		return `${when.getFullYear()}-${when.getMonth()}-${when.getDate()}`;
+	}
+
+	/// Midnight local, for measuring day offsets.
+	function dayStart(ms) {
+		const when = new Date(ms);
+		when.setHours(0, 0, 0, 0);
+		return when.getTime();
+	}
+
+	/// The end time, with a day offset when the session outlived the day it began
+	/// on. Without the date in the row, a 23:50 start would otherwise appear to
+	/// end at 00:10 - before it began.
+	function endTime(session) {
+		const start = parseStamp(session.createdAt);
+		const end = parseStamp(session.updatedAt);
+		if (end === null) return "—";
+		const label = timeOf(session.updatedAt);
+		if (start === null) return label;
+		const days = Math.round((dayStart(end) - dayStart(start)) / 86_400_000);
+		return days > 0 ? `${label} +${days}d` : label;
+	}
+
+	/// A local calendar day as "Sat 20 Sep 2026" for the day's spanning row.
+	function dayLabel(ms) {
+		const when = new Date(ms);
+		const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+		const months = [
+			"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+			"Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+		];
+		return `${weekdays[when.getDay()]} ${when.getDate()} ${months[when.getMonth()]} ${when.getFullYear()}`;
 	}
 
 	// The build stamp, baked in at bundle time by vite (`define` in
@@ -616,16 +674,21 @@
 									</tr>
 								</thead>
 								<tbody>
-									{#each sessions as session (session.sessionId)}
-										<tr onclick={() => openSession(session.sessionId)}>
-											<td class="name">
-												<button class="link">{session.name}</button>
-											</td>
-											<td class="when">{whenStamp(session.createdAt)}</td>
-											<td class="when">{whenStamp(session.updatedAt)}</td>
-											<td class="num duration">{sessionDuration(session.createdAt, session.updatedAt)}</td>
-											<td class="num">{session.messageCount}</td>
+									{#each sessionDays as day (day.key)}
+										<tr class="day-row">
+											<td colspan="5">{day.label}</td>
 										</tr>
+										{#each day.sessions as session (session.sessionId)}
+											<tr onclick={() => openSession(session.sessionId)}>
+												<td class="name">
+													<button class="link">{session.name}</button>
+												</td>
+												<td class="when">{timeOf(session.createdAt)}</td>
+												<td class="when">{endTime(session)}</td>
+												<td class="num duration">{sessionDuration(session.createdAt, session.updatedAt)}</td>
+												<td class="num">{session.messageCount}</td>
+											</tr>
+										{/each}
 									{/each}
 								</tbody>
 							</table>
@@ -923,6 +986,22 @@
 	.sessions td.name button {
 		margin-left: 0;
 		text-align: left;
+		overflow-wrap: anywhere;
+	}
+	/* The day's own row: it labels the times below it, so it reads as a heading
+	   rather than as a session, and it is not a click target. */
+	.sessions tr.day-row td {
+		font-size: 10px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.05em;
+		opacity: 0.6;
+		padding-top: 0.7rem;
+	}
+	tbody tr.day-row,
+	tbody tr.day-row:hover {
+		cursor: default;
+		background: none;
 	}
 	/* The duration is the number the eye is looking for, so it gets the accent
 	   and stays on one line while the stamps beside it are allowed to wrap. */
@@ -940,6 +1019,17 @@
 	@media (max-width: 46rem) {
 		.columns {
 			grid-template-columns: minmax(0, 1fr);
+		}
+		/* On a phone the sessions table has five columns to place in about
+		   320px. The day rows have taken the dates out of the row, so all that
+		   is left is to buy back the padding: tighter cells and a smaller role
+		   for the numbers let the whole row fit without a sideways scroll. */
+		.sessions th,
+		.sessions td {
+			padding: 4px 4px;
+		}
+		.sessions td.name button {
+			font-size: 12px;
 		}
 	}
 	.busy {
