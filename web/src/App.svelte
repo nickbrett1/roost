@@ -18,6 +18,7 @@
 		stateLabel
 	} from "./lib/api.js";
 	import { FLEET_HASH, agentHash, parseRoute, sessionHash } from "./lib/route.js";
+	import { readCache, writeCache } from "./lib/cache.js";
 
 	let agents = $state([]);
 	let connected = $state(false);
@@ -32,6 +33,7 @@
 	let historyError = $state(null);
 	let search = $state("");
 	let sessions = $state(null);
+	let sessionsRefreshing = $state(false);
 	let matches = $state(null);
 	let transcript = $state(null);
 
@@ -110,6 +112,16 @@
 	// The hub's ring is bounded (512); mirror that bound so a long-lived view
 	// holds no more than the hub would have sent it anyway.
 	const ACTIVITY_CAP = 512;
+
+	// How long a cached sessions list is worth painting before the panel goes
+	// back to waiting for a fresh one. A day matches how far back the list is
+	// interesting anyway; beyond it the reader is better served by a real load
+	// than by a stale first paint.
+	const SESSION_CACHE_MS = 24 * 60 * 60 * 1000;
+
+	/// This tab's session storage, or null where it is unavailable (a restricted
+	/// privacy mode). readCache/writeCache treat null as "no cache".
+	const store = typeof sessionStorage === "undefined" ? null : sessionStorage;
 
 	// The feed's kind column. `answer` is the agent's own words, so it is named
 	// the agent's *answer* rather than "say": on a page where the reader is
@@ -265,6 +277,7 @@
 		transcript = null;
 		historyError = null;
 		sessions = null;
+		sessionsRefreshing = false;
 		activityEntries = [];
 		activityError = null;
 	}
@@ -317,12 +330,32 @@
 	}
 
 	async function loadSessions(agentId) {
+		// Paint the last copy at once, then fetch. The fetch crosses the agent's
+		// tunnel and waits behind any turn in flight, which is where the seconds
+		// go - the read itself is tens of milliseconds. So the panel opens on what
+		// it showed last time and corrects itself, instead of opening empty and
+		// making the reader wait for a query that is already effectively answered.
+		const key = `roost:sessions:${agentId}`;
+		const cached = readCache(store, key, { maxAgeMs: SESSION_CACHE_MS });
+		if (Array.isArray(cached)) {
+			sessions = cached;
+			sessionsRefreshing = true;
+		} else {
+			sessions = null;
+			sessionsRefreshing = false;
+		}
 		try {
-			sessions = await fetchHistorySessions(agentId, { limit: 20 });
+			const fresh = await fetchHistorySessions(agentId, { limit: 20 });
+			sessions = fresh;
+			writeCache(store, key, fresh);
 			historyError = null;
 		} catch (cause) {
 			historyError = cause.message;
-			sessions = [];
+			// Keep what was painted when there is something; only blank the panel
+			// when the failure left it with nothing at all.
+			if (!Array.isArray(cached)) sessions = [];
+		} finally {
+			sessionsRefreshing = false;
 		}
 	}
 
@@ -657,7 +690,14 @@
 							{/each}
 						{/if}
 					{:else}
-						<h3>sessions</h3>
+						<h3>
+							sessions
+							{#if sessionsRefreshing}
+								<!-- The list on screen is the last one; say so, so a reader who
+								     knows the agent just did something is not misled by it. -->
+								<span class="note">refreshing…</span>
+							{/if}
+						</h3>
 						{#if sessions === null}
 							<p class="muted">loading…</p>
 						{:else if sessions.length === 0}
