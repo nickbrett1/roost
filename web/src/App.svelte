@@ -13,6 +13,7 @@
 		relativeAge,
 		roleLabel,
 		searchHistory,
+		sessionDuration,
 		spokenMessages,
 		stateLabel
 	} from "./lib/api.js";
@@ -40,6 +41,14 @@
 	// that have text. The raw list stays whole because paging counts messages,
 	// not utterances.
 	const spoken = $derived(spokenMessages(transcript?.messages));
+
+	// The transcript draws only the messages with text, so its line count is
+	// smaller than the session's own message count - which read as a bug ("17
+	// messages" in the list, nine lines in the drill-in). The session's total is
+	// stated beside the drawn count so the gap is explained, not mysterious.
+	const transcriptTotal = $derived(
+		sessionCountFor(sessionId) ?? transcript?.messages.length ?? 0
+	);
 
 	// The live turn view (memo §6.3). Activity does not come from history: the
 	// hub already holds the frames it was pushed, so this opens populated and
@@ -102,10 +111,16 @@
 	// holds no more than the hub would have sent it anyway.
 	const ACTIVITY_CAP = 512;
 
+	// The feed's kind column. `answer` is the agent's own words, so it is named
+	// the agent's *answer* rather than "say": on a page where the reader is
+	// also a participant, "say" left it genuinely ambiguous who was speaking.
+	// `usage` is always the context window (used of size), so it reads as
+	// "context".
 	function label(line) {
 		if (line.type === "thought") return "think";
-		if (line.type === "answer") return "say";
+		if (line.type === "answer") return "answer";
 		if (line.type === "tool_call" || line.type === "tool_call_update") return "tool";
+		if (line.type === "usage") return "context";
 		return line.type.replaceAll("_", " ");
 	}
 
@@ -131,13 +146,26 @@
 	}
 
 	/// A folded run of `answer`/`thought` frames whose agent published no text -
-	/// only `deltaBytes` reached the wire. Say what did arrive, because an empty
-	/// row reads as a broken page rather than as an agent's choice.
+	/// only `deltaBytes` reached the wire. Say how much arrived and that it was
+	/// output, because an empty row reads as a broken page rather than as an
+	/// agent's choice. The frame count and the old "text not published" line
+	/// were dropped: one is an artefact of how the wire chops text up, and the
+	/// other left the reader guessing what it applied to.
 	function unspoken(line) {
-		const parts = [`${line.chunks} delta${line.chunks === 1 ? "" : "s"}`];
-		if (line.bytes > 0) parts.push(size(line.bytes));
-		parts.push("text not published");
-		return parts.join(" · ");
+		return line.bytes > 0 ? `${size(line.bytes)} of output` : "output";
+	}
+
+	/// A session stamp as a local "YYYY-MM-DD HH:MM" for the sessions table.
+	/// Local, not UTC: this is read as "when did that sitting happen", next to
+	/// the durations, so it belongs in the reader's own zone.
+	function whenStamp(value) {
+		const ms = parseStamp(value);
+		if (ms === null) return "—";
+		const when = new Date(ms);
+		const pad = (part) => String(part).padStart(2, "0");
+		return `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())} ${pad(
+			when.getHours()
+		)}:${pad(when.getMinutes())}`;
 	}
 
 	// The build stamp, baked in at bundle time by vite (`define` in
@@ -452,12 +480,23 @@
 					{#if spoken.length === 0}
 						<p class="muted">no messages with text in this window</p>
 					{:else}
-						{#each spoken as message, i (message.index ?? i)}
-							<p class="message">
-								<span class="role">{roleLabel(message.role)}</span>
-								{message.text}
+						{#if spoken.length < transcriptTotal}
+							<p class="muted">
+								{spoken.length} of {transcriptTotal} messages have text · tool calls and steps
+								without text are hidden
 							</p>
-						{/each}
+						{/if}
+						<!-- One message per turn, hung off a role gutter: user text and the
+						     agent's answer were the same paragraph before, which is what made
+						     the conversation hard to follow. -->
+						<div class="conversation">
+							{#each spoken as message, i (message.index ?? i)}
+								<article class="turn {message.role === 'user' ? 'from-user' : 'from-agent'}">
+									<span class="speaker">{roleLabel(message.role)}</span>
+									<p class="utterance">{message.text}</p>
+								</article>
+							{/each}
+						</div>
 					{/if}
 					{#if transcript.nextCursor}
 						<p class="muted">more messages available</p>
@@ -566,19 +605,30 @@
 						{:else if sessions.length === 0}
 							<p class="muted">no sessions</p>
 						{:else}
-							{#each sessions as session (session.sessionId)}
-								<p>
-									<button class="link" onclick={() => openSession(session.sessionId)}>
-										{session.name}
-									</button>
-									<span class="muted">
-										{session.messageCount} messages · {session.tokens} tokens · {relativeAge(
-											parseStamp(session.updatedAt),
-											nowMs
-										)}
-									</span>
-								</p>
-							{/each}
+							<table class="sessions">
+								<thead>
+									<tr>
+										<th>session</th>
+										<th>start</th>
+										<th>end</th>
+										<th class="num">duration</th>
+										<th class="num">msgs</th>
+									</tr>
+								</thead>
+								<tbody>
+									{#each sessions as session (session.sessionId)}
+										<tr onclick={() => openSession(session.sessionId)}>
+											<td class="name">
+												<button class="link">{session.name}</button>
+											</td>
+											<td class="when">{whenStamp(session.createdAt)}</td>
+											<td class="when">{whenStamp(session.updatedAt)}</td>
+											<td class="num duration">{sessionDuration(session.createdAt, session.updatedAt)}</td>
+											<td class="num">{session.messageCount}</td>
+										</tr>
+									{/each}
+								</tbody>
+							</table>
 						{/if}
 					{/if}
 				</div>
@@ -827,12 +877,59 @@
 		color: #7dd3fc;
 		text-decoration: underline;
 	}
-	.message {
-		margin: 0.25rem 0;
+	/* The conversation. Each turn hangs off a coloured role gutter so a glance
+	   tells whose words these are: the user is the accent, the agent is plain
+	   text, which is the reading that was missing when both were one paragraph. */
+	.conversation {
+		margin-top: 0.5rem;
 	}
-	.role {
-		opacity: 0.55;
-		margin-right: 0.5rem;
+	.turn {
+		display: grid;
+		grid-template-columns: 3.75rem minmax(0, 1fr);
+		gap: 0.5rem;
+		padding: 0.4rem 0.6rem;
+		margin-bottom: 0.35rem;
+		border-radius: 6px;
+		border-left: 2px solid rgba(148, 163, 184, 0.2);
+		background: rgba(15, 23, 42, 0.3);
+	}
+	.turn.from-user {
+		border-left-color: #7dd3fc;
+		background: rgba(56, 189, 248, 0.07);
+	}
+	.turn .speaker {
+		font-size: 10px;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.04em;
+		opacity: 0.6;
+		padding-top: 2px;
+	}
+	.turn.from-user .speaker {
+		color: #7dd3fc;
+		opacity: 1;
+	}
+	.turn .utterance {
+		margin: 0;
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+	}
+	.sessions {
+		margin-top: 0.25rem;
+	}
+	.sessions .name {
+		font-weight: 600;
+	}
+	.sessions td.name button {
+		margin-left: 0;
+		text-align: left;
+	}
+	/* The duration is the number the eye is looking for, so it gets the accent
+	   and stays on one line while the stamps beside it are allowed to wrap. */
+	.sessions td.duration {
+		white-space: nowrap;
+		color: #7dd3fc;
+		font-weight: 600;
 	}
 	.columns {
 		display: grid;

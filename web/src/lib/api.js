@@ -284,6 +284,86 @@ export async function fetchAgentActivity(agentId, fetchImpl = globalThis.fetch) 
 }
 
 /**
+ * How full the context window is, as a percentage that reads at a glance.
+ *
+ * The point of the usage row is "how close to the ceiling are we", so the
+ * percentage comes first and is coarse on the low end: anything above zero but
+ * under a tenth of a percent says `<0.1%` rather than rounding to a flat `0.0%`
+ * and reading as "nothing used".
+ *
+ * @param {number} used
+ * @param {number} size
+ * @returns {string} e.g. "4.2%"
+ */
+export function contextPercent(used, size) {
+	if (!(size > 0)) return "0%";
+	const pct = (used / size) * 100;
+	if (used > 0 && pct < 0.1) return "<0.1%";
+	return `${pct.toFixed(1)}%`;
+}
+
+/**
+ * A stop reason as a word about the turn's outcome.
+ *
+ * `end_turn` is the model saying it was done: a normal, successful completion,
+ * which is a fact about the turn rather than the name of a protocol enum. The
+ * other reasons (`cancel`, an error, a length cap) are already self-describing
+ * and are passed through unchanged, because the distinction the line is drawing
+ * is exactly success versus not.
+ *
+ * @param {string} reason
+ * @returns {string}
+ */
+export function stopReasonLabel(reason) {
+	return reason === "end_turn" ? "success" : reason;
+}
+
+/**
+ * A span of milliseconds as a compact duration.
+ *
+ * Rendered in the sessions list, where the useful reading is the scale of the
+ * sitting - "a bit", "an hour", "most of a day" - not a stopwatch. So it keeps
+ * only the two largest units that apply and drops seconds as soon as there are
+ * minutes.
+ *
+ * @param {number} ms
+ * @returns {string} e.g. "48s", "31m", "3h 20m", "2d 4h"
+ */
+export function elapsedLabel(ms) {
+	if (!Number.isFinite(ms) || ms < 0) return "";
+	const seconds = Math.round(ms / 1000);
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes}m`;
+	const hours = Math.floor(minutes / 60);
+	if (hours < 24) {
+		const rem = minutes % 60;
+		return rem > 0 ? `${hours}h ${rem}m` : `${hours}h`;
+	}
+	const days = Math.floor(hours / 24);
+	const rem = hours % 24;
+	return rem > 0 ? `${days}d ${rem}h` : `${days}d`;
+}
+
+/**
+ * How long a session ran, from its first to its last message.
+ *
+ * The two stamps are the naive-UTC strings the agent writes, read the same way
+ * the list reads them (see `parseStamp`). An unknown or inverted pair yields an
+ * empty string rather than a nonsense duration.
+ *
+ * @param {string|null|undefined} from
+ * @param {string|null|undefined} to
+ * @returns {string}
+ */
+export function sessionDuration(from, to) {
+	const start = parseStamp(from);
+	const end = parseStamp(to);
+	if (start === null || end === null || end < start) return "";
+	return elapsedLabel(end - start);
+}
+
+/**
  * A one-line gist of an event the view has no special rendering for. Unknown
  * types are shown, not dropped: version skew is normal (memo §3.4), and an
  * operator is better served by seeing a frame they do not recognise than by the
@@ -291,9 +371,10 @@ export async function fetchAgentActivity(agentId, fetchImpl = globalThis.fetch) 
  *
  * The two frame types a turn always ends with are spelled out, because their
  * payload is a dump of counters and `key=value` for `usage`/`finished` reads as
- * debugging output rather than as "the turn used 124864 of its 1000000 context
- * and stopped on end_turn". Everything else keeps the generic fallback, which
- * is what makes an unfamiliar frame legible instead of invisible.
+ * debugging output. The `usage` line leads with the percentage of the context
+ * window already spent, then the raw counts, so "how close are we" needs no
+ * arithmetic; the `finished` line leads with the outcome as a word (`success`
+ * for a normal completion) rather than the enum that produced it.
  *
  * @param {object} event
  * @returns {string}
@@ -302,11 +383,11 @@ export function describeEvent(event) {
 	if (typeof event?.text === "string") return event.text;
 	const { type, ...rest } = event ?? {};
 	if (type === "usage" && typeof rest.used === "number" && typeof rest.size === "number") {
-		return `context ${rest.used} of ${rest.size}`;
+		return `${contextPercent(rest.used, rest.size)} used · ${rest.used} of ${rest.size} tokens`;
 	}
 	if (type === "finished") {
 		const parts = [];
-		if (rest.stopReason) parts.push(rest.stopReason);
+		if (rest.stopReason) parts.push(stopReasonLabel(rest.stopReason));
 		if (typeof rest.inputTokens === "number" || typeof rest.outputTokens === "number") {
 			parts.push(`${rest.inputTokens ?? 0} in / ${rest.outputTokens ?? 0} out`);
 		}
@@ -335,8 +416,11 @@ export function describeEvent(event) {
  *
  * Each folded text line also carries `chunks` and `bytes`, summed from the
  * `deltaBytes` the frames published. Some agents stream the shape of a turn
- * without its words; the counts are then the only thing left to render, and
- * they keep a folded run from collapsing to a silent blank line.
+ * without its words; the byte count is then the only thing left to render, and
+ * it keeps a folded run from collapsing to a silent blank line. `chunks` is
+ * kept for completeness but is no longer shown: a frame count is an artefact of
+ * how the wire chops an utterance up, and it told the reader nothing about the
+ * turn.
  *
  * @param {Array<object>} entries raw entries, oldest first
  * @param {{ limit?: number }} [options] how many trailing lines to keep

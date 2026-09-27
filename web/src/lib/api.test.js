@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+	contextPercent,
 	describeEvent,
+	elapsedLabel,
 	eventAtMs,
 	fetchAgentActivity,
 	fetchFleet,
@@ -13,8 +15,10 @@ import {
 	relativeAge,
 	roleLabel,
 	searchHistory,
+	sessionDuration,
 	spokenMessages,
-	stateLabel
+	stateLabel,
+	stopReasonLabel
 } from "./api.js";
 
 describe("fetchFleet", () => {
@@ -337,7 +341,7 @@ describe("describeEvent", () => {
 
 	it("spells out a usage frame instead of dumping its counters", () => {
 		expect(describeEvent({ type: "usage", size: 1000000, used: 124864 })).toBe(
-			"context 124864 of 1000000"
+			"12.5% used · 124864 of 1000000 tokens"
 		);
 	});
 
@@ -355,15 +359,86 @@ describe("describeEvent", () => {
 				stopReason: "end_turn",
 				totalTokens: 124864
 			})
-		).toBe("end_turn · 123827 in / 1037 out · 124864 total");
+		).toBe("success · 123827 in / 1037 out · 124864 total");
+	});
+
+	it("leaves a non-successful stop reason as it is", () => {
+		expect(describeEvent({ type: "finished", stopReason: "cancel" })).toBe("cancel");
+		expect(describeEvent({ type: "finished", stopReason: "max_tokens" })).toBe("max_tokens");
 	});
 
 	it("says what it can when a finished frame is incomplete", () => {
-		expect(describeEvent({ type: "finished", stopReason: "end_turn" })).toBe("end_turn");
+		expect(describeEvent({ type: "finished", stopReason: "end_turn" })).toBe("success");
 		expect(describeEvent({ type: "finished", totalTokens: 42 })).toBe("42 total");
 		// Nothing recognisable left: the generic gist still shows what came,
 		// rather than silently rendering the word "finished".
 		expect(describeEvent({ type: "finished", stopReason: null })).toBe("stopReason=null");
+	});
+});
+
+describe("contextPercent", () => {
+	it("leads with the fraction of the window in use", () => {
+		expect(contextPercent(8375, 200000)).toBe("4.2%");
+		expect(contextPercent(124864, 1000000)).toBe("12.5%");
+	});
+
+	it("does not round a sliver of use down to nothing", () => {
+		expect(contextPercent(5, 1000000)).toBe("<0.1%");
+	});
+
+	it("copes with a window the agent did not size", () => {
+		expect(contextPercent(0, 0)).toBe("0%");
+	});
+});
+
+describe("stopReasonLabel", () => {
+	it("names a normal completion as success", () => {
+		expect(stopReasonLabel("end_turn")).toBe("success");
+	});
+
+	it("passes every other reason through", () => {
+		expect(stopReasonLabel("cancel")).toBe("cancel");
+		expect(stopReasonLabel("error")).toBe("error");
+	});
+});
+
+describe("elapsedLabel", () => {
+	it("keeps seconds only under a minute", () => {
+		expect(elapsedLabel(48_000)).toBe("48s");
+	});
+
+	it("drops seconds once there are minutes", () => {
+		expect(elapsedLabel(31 * 60_000 + 7_000)).toBe("31m");
+	});
+
+	it("shows the two largest units", () => {
+		expect(elapsedLabel(3 * 3_600_000 + 20 * 60_000)).toBe("3h 20m");
+		expect(elapsedLabel(2 * 86_400_000 + 4 * 3_600_000)).toBe("2d 4h");
+	});
+
+	it("omits a zero remainder rather than trailing a bare unit", () => {
+		expect(elapsedLabel(2 * 3_600_000)).toBe("2h");
+		expect(elapsedLabel(3 * 86_400_000)).toBe("3d");
+	});
+
+	it("refuses a nonsense span", () => {
+		expect(elapsedLabel(-1)).toBe("");
+		expect(elapsedLabel(Number.NaN)).toBe("");
+	});
+});
+
+describe("sessionDuration", () => {
+	it("measures first message to last", () => {
+		expect(sessionDuration("2026-09-20T02:00:00Z", "2026-09-20T02:31:07Z")).toBe("31m");
+	});
+
+	it("reads the agent's naive stamps as the UTC they are", () => {
+		expect(sessionDuration("2026-09-20 02:00:00", "2026-09-20 02:31:07")).toBe("31m");
+	});
+
+	it("stays quiet when a stamp is missing or inverted", () => {
+		expect(sessionDuration(null, "2026-09-20T02:31:07Z")).toBe("");
+		expect(sessionDuration("2026-09-21T02:00:00Z", "2026-09-20T02:31:07Z")).toBe("");
 	});
 });
 
