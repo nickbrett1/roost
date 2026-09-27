@@ -6,17 +6,26 @@
 # configuration to point at your NAS hostname/IP. The URL uses the PUBLISHED
 # HOST port (left-hand side of publishPort), not the container port.
 #
-# The widget block is only emitted when a health mechanism is declared
-# (docker-container `healthcheck` config); without one there is no endpoint to
-# query, so the widget is omitted to avoid a perpetually-red status.
+# The widget reads `/api/homepage`, not `/healthz`: health says the container
+# is up, which the Docker provider already knows, while the activity list says
+# what the fleet is *doing*. `display: dynamic-list` renders one row per
+# connected agent - the agent id on the left, its state and last event on the
+# right - so the dashboard shows what the fleet page shows, at a glance. Agents
+# whose tunnel is down are omitted: the widget answers "what is running".
 
 - roost:
     icon: sh-docker
     href: http://localhost:3008/
-    description: roost container
+    description: agent fleet activity
     widget:
       type: customapi
-      url: http://localhost:3008/healthz
+      url: http://localhost:3008/api/homepage
+      refreshInterval: 10000
+      display: dynamic-list
       mappings:
-        - field: status
-          label: Status
+        items: agents
+        name: agentId
+        label: status
+        limit: 12
+        format: text
+        target: http://localhost:3008/#/agent/{agentId}

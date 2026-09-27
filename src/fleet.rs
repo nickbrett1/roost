@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::config::Config;
@@ -103,6 +103,58 @@ impl AgentStatus {
             raw: Some(body.clone()),
         }
     }
+}
+
+/// A relative age, in the units a glance cares about: "3s ago", "12m ago",
+/// "2h ago", "3d ago".
+///
+/// The Homepage widget has no clock of its own. It re-fetches on an interval
+/// and prints whatever it is handed, so an absolute timestamp would go stale on
+/// screen; the age has to be rendered here, where "now" is a real number.
+pub fn age_label(seconds: Option<u64>) -> String {
+    match seconds {
+        None => "no activity yet".to_string(),
+        Some(s) if s < 60 => format!("{s}s ago"),
+        Some(s) if s < 3_600 => format!("{}m ago", s / 60),
+        Some(s) if s < 86_400 => format!("{}h ago", s / 3_600),
+        Some(s) => format!("{}d ago", s / 86_400),
+    }
+}
+
+/// One line per *connected* agent, for the Homepage activity widget: who it is,
+/// and how it reads at a glance.
+///
+/// Only connected agents are listed - a tunnel that is down is not "an online
+/// agent", and the home dashboard is answering "what is running right now".
+/// The agent version is deliberately absent: on the fleet page it is worth a
+/// column, but on a glance-sized widget the only questions are "is it working"
+/// and "how recently did it last do something", which is exactly the status.
+///
+/// Ordered like the fleet view - whoever last did something comes first, and an
+/// agent that has never published anything sorts last rather than first.
+pub fn homepage_agents(views: &[AgentView]) -> Vec<Value> {
+    let mut online: Vec<&AgentView> = views.iter().filter(|view| view.connected).collect();
+    online.sort_by(|a, b| {
+        let at = a.last_event_at_ms.unwrap_or(0);
+        let bt = b.last_event_at_ms.unwrap_or(0);
+        bt.cmp(&at).then_with(|| a.agent_id.cmp(&b.agent_id))
+    });
+    online
+        .into_iter()
+        .map(|view| {
+            let doing = if view.stuck {
+                "stuck"
+            } else if view.in_flight > 0 {
+                "in flight"
+            } else {
+                "idle"
+            };
+            json!({
+                "agentId": view.agent_id,
+                "status": format!("{doing} · {}", age_label(view.seconds_since_event)),
+            })
+        })
+        .collect()
 }
 
 /// The per-agent view sent to browsers and rendered by the fleet list.
@@ -514,6 +566,77 @@ pub fn is_stuck(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn a_view(
+        agent_id: &str,
+        connected: bool,
+        in_flight: u32,
+        stuck: bool,
+        age: Option<u64>,
+    ) -> AgentView {
+        AgentView {
+            agent_id: agent_id.to_string(),
+            host: "h".to_string(),
+            kind: "a2a-goose".to_string(),
+            agent_version: "0.1.0".to_string(),
+            protocol_version: 1,
+            boot_id: "b".to_string(),
+            started_at: None,
+            skills: vec![],
+            capabilities: vec![],
+            state: AgentStateName::Live,
+            connected,
+            stuck,
+            in_flight,
+            session_count: None,
+            activity_enabled: Some(true),
+            last_event_at_ms: age.map(|s| now_ms().saturating_sub(s * 1_000)),
+            last_event_at: None,
+            last_frame_at_ms: 0,
+            connected_at_ms: 0,
+            seconds_since_event: age,
+            event_count: 1,
+        }
+    }
+
+    #[test]
+    fn age_label_speaks_in_glance_units() {
+        assert_eq!(age_label(None), "no activity yet");
+        assert_eq!(age_label(Some(3)), "3s ago");
+        assert_eq!(age_label(Some(59)), "59s ago");
+        assert_eq!(age_label(Some(60)), "1m ago");
+        assert_eq!(age_label(Some(59 * 60)), "59m ago");
+        assert_eq!(age_label(Some(3_600)), "1h ago");
+        assert_eq!(age_label(Some(86_400)), "1d ago");
+        assert_eq!(age_label(Some(3 * 86_400)), "3d ago");
+    }
+
+    #[test]
+    fn homepage_lists_only_connected_agents_newest_first() {
+        let views = vec![
+            a_view("idle-old", true, 0, false, Some(600)),
+            a_view("offline", false, 0, false, Some(1)),
+            a_view("working", true, 2, false, Some(5)),
+            a_view("never", true, 0, false, None),
+        ];
+        let list = homepage_agents(&views);
+        let ids: Vec<&str> = list
+            .iter()
+            .map(|v| v["agentId"].as_str().unwrap())
+            .collect();
+        // The offline agent is not "an online agent"; the one with no activity
+        // sorts last, not first.
+        assert_eq!(ids, vec!["working", "idle-old", "never"]);
+        assert_eq!(list[0]["status"], "in flight · 5s ago");
+        assert_eq!(list[1]["status"], "idle · 10m ago");
+        assert_eq!(list[2]["status"], "idle · no activity yet");
+    }
+
+    #[test]
+    fn homepage_calls_a_stuck_agent_stuck() {
+        let views = vec![a_view("wedged", true, 1, true, Some(300))];
+        assert_eq!(homepage_agents(&views)[0]["status"], "stuck · 5m ago");
+    }
 
     fn hub() -> Arc<Hub> {
         Hub::new(Config {

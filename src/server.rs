@@ -40,6 +40,7 @@ pub fn app(hub: Arc<Hub>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/api/fleet", get(fleet))
+        .route("/api/homepage", get(homepage))
         .route("/api/agents/{id}", get(agent))
         .route("/api/agents/{id}/activity", get(agent_activity))
         .route("/api/agents/{id}/history/sessions", get(history_sessions))
@@ -94,6 +95,13 @@ async fn healthz() -> Json<Value> {
 
 async fn fleet(State(hub): State<Arc<Hub>>) -> Json<Value> {
     Json(json!({ "agents": hub.snapshot(now_ms()) }))
+}
+
+/// The Homepage activity widget's feed: the connected agents as a flat list, so
+/// a `display: dynamic-list` Custom API widget can render it without knowing
+/// anything about roost's wire (§7). Read-only and derived, like `/api/fleet`.
+async fn homepage(State(hub): State<Arc<Hub>>) -> Json<Value> {
+    Json(json!({ "agents": crate::fleet::homepage_agents(&hub.snapshot(now_ms())) }))
 }
 
 async fn agent(State(hub): State<Arc<Hub>>, Path(id): Path<String>) -> Response {
