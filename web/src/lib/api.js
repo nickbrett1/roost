@@ -170,10 +170,35 @@ export function spokenMessages(messages) {
 	);
 }
 
+/**
+ * The hub's history routes proxy the request over the agent's tunnel, so a
+ * momentary tunnel blip shows up as 502 (`agent_error`) or 503
+ * (`agent_unreachable`) even though the very next attempt succeeds. One quiet
+ * retry turns a blip into a slow answer instead of an error - and every route
+ * that goes through here (`history.*`, `activity`) is a read, so it is safe.
+ */
+const TRANSIENT_STATUS = new Set([502, 503]);
+
+/** The hub puts the real reason in the body; keep it instead of dropping it. */
+async function errorDetail(response) {
+	try {
+		const body = await response.json();
+		const detail = body?.message ?? body?.error;
+		return detail ? `: ${detail}` : "";
+	} catch {
+		return "";
+	}
+}
+
 /** Shared JSON GET that raises on a non-2xx response. */
 async function getJson(fetchImpl, path) {
-	const response = await fetchImpl(path);
-	if (!response.ok) throw new Error(`request failed: ${response.status}`);
+	let response = await fetchImpl(path);
+	if (TRANSIENT_STATUS.has(response.status)) {
+		response = await fetchImpl(path);
+	}
+	if (!response.ok) {
+		throw new Error(`request failed: ${response.status}${await errorDetail(response)}`);
+	}
 	return response.json();
 }
 
