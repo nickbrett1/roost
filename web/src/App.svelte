@@ -60,6 +60,31 @@
 	let activityError = $state(null);
 	let activity = $derived(foldActivity(activityEntries));
 
+	// The feed's scroll box. The frame list is chronological - oldest at the
+	// top, the newest frame last - so a live turn's newest frame sits below the
+	// fold of the panel's own 24rem scroll box, and the panel opened on an
+	// hour-old frame instead of on the one being written now.
+	let feedEl = $state(null);
+
+	// Whether the feed should keep following new frames down. True whenever the
+	// scroll box is (re)mounted, and held true only while the reader is already
+	// at the bottom: scrolling back to read a run of frames is theirs to keep,
+	// not the next delta's to yank. Neither this nor its box is drawn, so
+	// neither is a rune: they are read by the follow below, never rendered.
+	let feedPinned = true;
+
+	// The scroll box the pin belongs to, so a freshly mounted one (the gated,
+	// historical feed shares this element slot) starts pinned rather than
+	// inheriting the pin the reader left on the last one.
+	let feedPinnedFor = null;
+
+	// How close to the bottom still counts as "at the bottom". A delta can land
+	// between the reader's scroll and the effect, so this is a row's worth of
+	// slack rather than an exact match.
+	function feedAtBottom(el) {
+		return el.scrollHeight - el.scrollTop - el.clientHeight <= 8;
+	}
+
 	// The instant of the newest frame in the ring: the agent's own timestamp
 	// when it sent one, the hub's receipt when it did not. Everything below
 	// dates the panel from this, so the ring's clock and its age can never
@@ -87,6 +112,22 @@
 		(selectedAgent?.inFlight ?? 0) > 0 ||
 			(activityAtMs !== null && nowMs - activityAtMs <= ACTIVITY_FRESH_MS)
 	);
+
+	// A live feed opens on its newest frame, not on the top of the ring. The
+	// gate below keeps a stale ring folded away, and when it is opened there it
+	// is history, read from the start - so this follows only while the turn is
+	// live. `activity.length` is read so a new frame re-runs the follow; the
+	// effect body reads the scroll box itself after Svelte has laid it out.
+	$effect(() => {
+		const el = feedEl;
+		if (el !== feedPinnedFor) {
+			feedPinned = true;
+			feedPinnedFor = el;
+		}
+		if (!el || !feedLive || !feedPinned) return;
+		void activity.length;
+		el.scrollTop = el.scrollHeight;
+	});
 
 	// The newest session on disk. Session stamps arrive naive and are read as
 	// the UTC they are (see parseStamp), so "newer than the feed" means the
@@ -280,6 +321,8 @@
 		sessionsRefreshing = false;
 		activityEntries = [];
 		activityError = null;
+		// A newly opened agent's feed starts pinned to the bottom again.
+		feedPinned = true;
 	}
 
 	function openAgent(agentId) {
@@ -600,7 +643,11 @@
 		<section class="drilldown">
 			<div class="columns">
 				{#snippet feedList()}
-					<ol class="feed">
+					<ol
+						class="feed"
+						bind:this={feedEl}
+						onscroll={() => (feedPinned = feedEl ? feedAtBottom(feedEl) : true)}
+					>
 						{#each activity as line, i (i)}
 							<li class={line.type}>
 								<span class="at" title={stampTime(line.at)}>{clock(line.at)}</span>
