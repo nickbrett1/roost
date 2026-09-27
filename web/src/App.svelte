@@ -373,10 +373,12 @@
 		}
 	}
 
-	// The agent pages history two messages at a time and only forward, so a
-	// session's first page is its opening prompt - which is how a 269-message
-	// conversation opened on two lines and read as empty. Aim for this many
-	// messages, and start that far from the end.
+	// The agent pages history two messages at a time and only forward. Reading a
+	// session means reading it the way it happened - from the opening prompt
+	// onward - so the transcript opens on the first page and grows forward, and
+	// this is how many messages one sitting of "load newer" aims to add. Opening
+	// on the tail instead put the end of the conversation first, which is the
+	// wrong way round to review work.
 	const TRANSCRIPT_WINDOW = 20;
 
 	/// The session's message count, from whichever list already has it. Null
@@ -388,51 +390,49 @@
 		return typeof row?.messageCount === "number" ? row.messageCount : null;
 	}
 
-	/// A run of messages from `start`, following the agent's forward-only
-	/// cursors until the window is full or the session runs out. Cursors are
-	/// message offsets, so seeking to the tail is one cursor, not a walk.
-	async function fetchWindow(agentId, id, start) {
-		let cursor = start > 0 ? String(start) : null;
+	/// A run of messages from `cursor` (null = the session's first message),
+	/// following the agent's forward-only cursors until the window is full or the
+	/// session runs out. Returns the messages and the cursor for whatever comes
+	/// next, so the view can grow the transcript in the direction it is read.
+	async function fetchWindow(agentId, id, cursor) {
+		let next = cursor;
 		const messages = [];
 		let nextCursor = null;
 		for (let page = 0; page < TRANSCRIPT_WINDOW; page += 1) {
-			const got = await fetchHistoryMessages(agentId, id, cursor ? { cursor } : {});
+			const got = await fetchHistoryMessages(agentId, id, next ? { cursor: next } : {});
 			if (got.messages.length === 0) break;
 			messages.push(...got.messages);
 			nextCursor = got.nextCursor;
 			if (!nextCursor) break;
-			cursor = nextCursor;
+			next = nextCursor;
 		}
 		return { messages, nextCursor };
 	}
 
 	async function loadTranscript(agentId, id) {
 		try {
-			const count = sessionCountFor(id);
-			const start = count === null ? 0 : Math.max(0, count - TRANSCRIPT_WINDOW);
-			let window = await fetchWindow(agentId, id, start);
-			// A seek the agent did not honour must not read as an empty session.
-			if (window.messages.length === 0 && start > 0) {
-				window = await fetchWindow(agentId, id, 0);
-			}
-			transcript = { sessionId: id, ...window };
+			// Always from the top: a deep link and a tap off the list land in the
+			// same place, and that place is the start of the session.
+			transcript = { sessionId: id, ...(await fetchWindow(agentId, id, null)) };
 			historyError = null;
 		} catch (cause) {
 			historyError = cause.message;
 		}
 	}
 
-	/// Reach back for the messages before the window, keeping what is on screen
-	/// where it is.
-	async function loadEarlier() {
-		if (!selected || !sessionId || !transcript) return;
-		const first = transcript.messages[0]?.index ?? 0;
-		if (first <= 0) return;
+	/// Append the next window, keeping what is already on screen. The transcript
+	/// grows downward, in the order the session was lived.
+	async function loadNewer() {
+		if (!selected || !sessionId || !transcript?.nextCursor) return;
 		try {
-			const start = Math.max(0, first - TRANSCRIPT_WINDOW);
-			const earlier = await fetchWindow(selected, sessionId, start);
-			const head = earlier.messages.filter((message) => (message.index ?? 0) < first);
-			transcript = { ...transcript, messages: [...head, ...transcript.messages] };
+			const more = await fetchWindow(selected, sessionId, transcript.nextCursor);
+			const known = new Set(transcript.messages.map((message) => message.index));
+			const fresh = more.messages.filter((message) => !known.has(message.index));
+			transcript = {
+				...transcript,
+				messages: [...transcript.messages, ...fresh],
+				nextCursor: more.nextCursor
+			};
 			historyError = null;
 		} catch (cause) {
 			historyError = cause.message;
@@ -563,18 +563,18 @@
 				{:else if transcript.messages.length === 0}
 					<p class="muted">no messages in this session</p>
 				{:else}
-					{#if (transcript.messages[0]?.index ?? 0) > 0}
-						<p>
-							<button onclick={loadEarlier}>load earlier messages</button>
-						</p>
-					{/if}
 					{#if spoken.length === 0}
 						<p class="muted">no messages with text in this window</p>
 					{:else}
-						{#if spoken.length < transcriptTotal}
+						{#if transcript.nextCursor || spoken.length < transcriptTotal}
 							<p class="muted">
-								{spoken.length} of {transcriptTotal} messages have text · tool calls and steps
-								without text are hidden
+								{#if transcript.nextCursor}
+									{spoken.length} messages with text so far · tool calls and steps without text
+									are hidden
+								{:else}
+									{spoken.length} of {transcriptTotal} messages have text · tool calls and steps
+									without text are hidden
+								{/if}
 							</p>
 						{/if}
 						<!-- One message per turn, hung off a role gutter: user text and the
@@ -590,7 +590,9 @@
 						</div>
 					{/if}
 					{#if transcript.nextCursor}
-						<p class="muted">more messages available</p>
+						<p>
+							<button onclick={loadNewer}>load newer messages</button>
+						</p>
 					{/if}
 				{/if}
 			</section>
