@@ -135,6 +135,48 @@ export function stateLabel(state) {
 }
 
 /**
+ * Whether an agent advertises that it can answer history.
+ *
+ * The drill-down's History panel proxies `history.*` over the agent's tunnel
+ * (`history.sessions`, `history.messages`, `history.search`), and a roost agent
+ * answers only the methods it advertised in its `hello` capabilities. So the
+ * panel is offered exactly when the fleet entry carries a history capability,
+ * and the token is what is gated on, not the method name.
+ *
+ * Two tokens mean it, because the fleet speaks both:
+ *   - `sessions` — every a2a-goose agent, and the token the pydantic-agent
+ *     generator is standardising on, so a future pydantic-agent is covered.
+ *   - `history`  — the Rust fake agent in this repo.
+ * Neither present means a history request is a guaranteed 502 (`unsupported
+ * method`), so the panel must not be offered at all.
+ *
+ * @param {object|null|undefined} agent a fleet entry from the hub
+ * @returns {boolean}
+ */
+export function supportsHistory(agent) {
+	const capabilities = agent?.capabilities;
+	if (!Array.isArray(capabilities)) return false;
+	return capabilities.includes("sessions") || capabilities.includes("history");
+}
+
+/**
+ * Whether a history failure means the agent does not answer history at all.
+ *
+ * The hub wraps an agent's own refusal in a 502 whose message carries the
+ * agent's words: `history.sessions failed: unsupported method
+ * 'history.sessions'`. That is an agent honouring its contract — it advertised
+ * no history, and it says so rather than inventing data — so the panel should
+ * collapse to one honest line, not paint the raw transport error. A blip or a
+ * genuinely broken agent does not match, and still surfaces as an error.
+ *
+ * @param {unknown} message an error message from a history call
+ * @returns {boolean}
+ */
+export function isUnsupportedMethodError(message) {
+	return typeof message === "string" && /unsupported method/i.test(message);
+}
+
+/**
  * The human label for a transcript role.
  *
  * History messages carry the wire's own role names, where the model's turns are

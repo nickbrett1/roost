@@ -10,6 +10,7 @@ import {
 	fetchHistorySessions,
 	fleetSummary,
 	foldActivity,
+	isUnsupportedMethodError,
 	openEventStream,
 	parseStamp,
 	relativeAge,
@@ -18,7 +19,8 @@ import {
 	sessionDuration,
 	spokenMessages,
 	stateLabel,
-	stopReasonLabel
+	stopReasonLabel,
+	supportsHistory
 } from "./api.js";
 
 describe("fetchFleet", () => {
@@ -555,5 +557,48 @@ describe("foldActivity", () => {
 
 	it("survives an empty ring", () => {
 		expect(foldActivity([])).toEqual([]);
+	});
+});
+
+describe("supportsHistory", () => {
+	it("is true when the agent advertises sessions (a2a-goose)", () => {
+		expect(supportsHistory({ capabilities: ["activity", "status", "sessions"] })).toBe(true);
+	});
+
+	it("is true when the agent advertises history (the Rust fake)", () => {
+		expect(supportsHistory({ capabilities: ["activity", "history", "logs", "reboot"] })).toBe(
+			true
+		);
+	});
+
+	it("is false for an agent that advertises only activity and status (pydantic-agent)", () => {
+		expect(supportsHistory({ capabilities: ["activity", "status"] })).toBe(false);
+	});
+
+	it("is false when there is nothing to read", () => {
+		expect(supportsHistory({ capabilities: [] })).toBe(false);
+		expect(supportsHistory({})).toBe(false);
+		expect(supportsHistory(null)).toBe(false);
+		expect(supportsHistory(undefined)).toBe(false);
+	});
+
+	it("is false when capabilities is not an array", () => {
+		expect(supportsHistory({ capabilities: "sessions" })).toBe(false);
+	});
+});
+
+describe("isUnsupportedMethodError", () => {
+	it("matches the hub's 502 wrapper around an agent's refusal", () => {
+		expect(
+			isUnsupportedMethodError(
+				"request failed: 502: history.sessions failed: unsupported method 'history.sessions' (this agent advertises ['activity', 'status'])"
+			)
+		).toBe(true);
+	});
+
+	it("does not match a transport blip", () => {
+		expect(isUnsupportedMethodError("request failed: 503")).toBe(false);
+		expect(isUnsupportedMethodError(null)).toBe(false);
+		expect(isUnsupportedMethodError(undefined)).toBe(false);
 	});
 });

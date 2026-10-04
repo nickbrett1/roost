@@ -8,6 +8,7 @@
 		fetchHistorySessions,
 		fleetSummary,
 		foldActivity,
+		isUnsupportedMethodError,
 		openEventStream,
 		parseStamp,
 		relativeAge,
@@ -15,7 +16,8 @@
 		searchHistory,
 		sessionDuration,
 		spokenMessages,
-		stateLabel
+		stateLabel,
+		supportsHistory
 	} from "./lib/api.js";
 	import { FLEET_HASH, agentHash, parseRoute, sessionHash } from "./lib/route.js";
 	import { readCache, writeCache } from "./lib/cache.js";
@@ -344,13 +346,18 @@
 			resetDrilldown();
 			selected = route.agentId;
 			if (route.agentId) {
-				loadSessions(route.agentId);
 				loadActivity(route.agentId);
+				// Only ask for history from an agent that advertises it. The
+				// fleet snapshot is loaded before the first route is resolved
+				// (see onMount), so the capabilities are known here.
+				if (agentHasHistory(route.agentId)) loadSessions(route.agentId);
 			}
 		}
 		if (route.sessionId !== sessionId) transcript = null;
 		sessionId = route.sessionId;
-		if (route.sessionId) loadTranscript(route.agentId, route.sessionId);
+		if (route.sessionId && agentHasHistory(route.agentId)) {
+			loadTranscript(route.agentId, route.sessionId);
+		}
 	}
 
 	async function loadActivity(agentId) {
@@ -373,6 +380,12 @@
 	}
 
 	async function loadSessions(agentId) {
+		// An agent that does not advertise history will answer unsupported
+		// method; do not make the request at all.
+		if (!agentHasHistory(agentId)) {
+			sessions = [];
+			return;
+		}
 		// Paint the last copy at once, then fetch. The fetch crosses the agent's
 		// tunnel and waits behind any turn in flight, which is where the seconds
 		// go - the read itself is tens of milliseconds. So the panel opens on what
@@ -404,7 +417,7 @@
 
 	async function runSearch() {
 		const query = search.trim();
-		if (!selected || query === "") {
+		if (!selected || query === "" || !agentHasHistory(selected)) {
 			matches = null;
 			return;
 		}
@@ -453,6 +466,7 @@
 	}
 
 	async function loadTranscript(agentId, id) {
+		if (!agentHasHistory(agentId)) return;
 		try {
 			// Always from the top: a deep link and a tap off the list land in the
 			// same place, and that place is the start of the session.
@@ -467,6 +481,7 @@
 	/// grows downward, in the order the session was lived.
 	async function loadNewer() {
 		if (!selected || !sessionId || !transcript?.nextCursor) return;
+		if (!agentHasHistory(selected)) return;
 		try {
 			const more = await fetchWindow(selected, sessionId, transcript.nextCursor);
 			const known = new Set(transcript.messages.map((message) => message.index));
@@ -489,8 +504,10 @@
 	}
 
 	onMount(() => {
-		load();
-		syncFromHash();
+		// Resolve the first route only once the fleet snapshot has landed: the
+		// drill-down gates history on the agent's advertised capabilities, and
+		// those arrive with the snapshot. A later hashchange has them already.
+		load().then(syncFromHash);
 		window.addEventListener("hashchange", syncFromHash);
 
 		// The fleet snapshot is authoritative; live deltas keep ages honest.
@@ -536,6 +553,30 @@
 	const selectedAgent = $derived(
 		agents.find((agent) => agent.agentId === selected) ?? null
 	);
+
+	// Whether the open agent advertises history at all (see supportsHistory).
+	// The History panel proxies `history.*` to the agent, and an agent that did
+	// not advertise a history capability answers `unsupported method` - the
+	// 502 that the first non-a2a-goose agent (capabilities ["activity",
+	// "status"]) produced when the panel was offered unconditionally. So the
+	// panel is gated on the advertisement, not rendered and left to fail.
+	const agentHistorySupported = $derived(supportsHistory(selectedAgent));
+
+	// The panel is unusable when the agent did not advertise history, and also
+	// when it advertised one but answered an individual call `unsupported
+	// method` anyway (a claim the methods do not back). Both collapse to one
+	// honest line instead of a raw transport error.
+	const historyUnsupported = $derived(
+		!agentHistorySupported || isUnsupportedMethodError(historyError)
+	);
+
+	/// Whether the agent with this id advertises history. Read from the last
+	/// fleet snapshot: capabilities come with the agent's `hello` and do not
+	/// change within a boot, so the board the drill-down opened from is
+	/// authoritative.
+	function agentHasHistory(agentId) {
+		return supportsHistory(agents.find((agent) => agent.agentId === agentId));
+	}
 
 	// The operator's first question is "who is doing something", so the fleet is
 	// ordered by the last event, newest first - by the same number the column
@@ -599,7 +640,12 @@
 			     underneath: on a phone that is what pushed the transcript off the
 			     bottom of the screen. -->
 			<section class="drilldown">
-				{#if historyError}
+				{#if historyUnsupported}
+					<!-- A deep link into a session of an agent that does not
+					     advertise history: say so rather than spinning forever or
+					     painting the raw 502 the proxy wraps it in. -->
+					<p class="muted">this agent does not expose history</p>
+				{:else if historyError}
 					<p class="error">history unavailable: {historyError}</p>
 				{:else if transcript === null}
 					<p class="muted">loading…</p>
@@ -707,80 +753,88 @@
 
 				<div class="history">
 					<h3>history</h3>
-					<div class="searchbar">
-						<input
-							type="search"
-							bind:value={search}
-							placeholder="search this agent's conversations"
-							onkeydown={(event) => event.key === "Enter" && runSearch()}
-						/>
-						<button onclick={runSearch}>search</button>
-						{#if matches !== null}
-							<button onclick={() => (matches = null)}>clear</button>
-						{/if}
-					</div>
-
-					{#if historyError}
-						<p class="error">history unavailable: {historyError}</p>
-					{/if}
-
-					{#if matches !== null}
-						<h3>matches</h3>
-						{#if matches.length === 0}
-							<p class="muted">no matches</p>
-						{:else}
-							{#each matches as match (match.sessionId)}
-								<p>
-									<button class="link" onclick={() => openSession(match.sessionId)}>
-										{match.name}
-									</button>
-									<span class="muted">{match.matches.length} match(es)</span>
-								</p>
-							{/each}
-						{/if}
+					{#if historyUnsupported}
+						<!-- The agent advertises no history capability, or answered a
+						     history call `unsupported method`, so the panel would only
+						     ever open on a guaranteed 502. Say so rather than offering
+						     an affordance that cannot work. -->
+						<p class="muted">this agent does not expose history</p>
 					{:else}
-						<h3>
-							sessions
-							{#if sessionsRefreshing}
-								<!-- The list on screen is the last one; say so, so a reader who
-								     knows the agent just did something is not misled by it. -->
-								<span class="note">refreshing…</span>
+							<div class="searchbar">
+							<input
+								type="search"
+								bind:value={search}
+								placeholder="search this agent's conversations"
+								onkeydown={(event) => event.key === "Enter" && runSearch()}
+							/>
+							<button onclick={runSearch}>search</button>
+							{#if matches !== null}
+								<button onclick={() => (matches = null)}>clear</button>
 							{/if}
-						</h3>
-						{#if sessions === null}
-							<p class="muted">loading…</p>
-						{:else if sessions.length === 0}
-							<p class="muted">no sessions</p>
+						</div>
+
+						{#if historyError}
+							<p class="error">history unavailable: {historyError}</p>
+						{/if}
+
+						{#if matches !== null}
+							<h3>matches</h3>
+							{#if matches.length === 0}
+								<p class="muted">no matches</p>
+							{:else}
+								{#each matches as match (match.sessionId)}
+									<p>
+										<button class="link" onclick={() => openSession(match.sessionId)}>
+											{match.name}
+										</button>
+										<span class="muted">{match.matches.length} match(es)</span>
+									</p>
+								{/each}
+							{/if}
 						{:else}
-							<table class="sessions">
-								<thead>
-									<tr>
-										<th>session</th>
-										<th>start</th>
-										<th>end</th>
-										<th class="num">duration</th>
-										<th class="num">msgs</th>
-									</tr>
-								</thead>
-								<tbody>
-									{#each sessionDays as day (day.key)}
-										<tr class="day-row">
-											<td colspan="5">{day.label}</td>
+							<h3>
+								sessions
+								{#if sessionsRefreshing}
+									<!-- The list on screen is the last one; say so, so a reader who
+									     knows the agent just did something is not misled by it. -->
+									<span class="note">refreshing…</span>
+								{/if}
+							</h3>
+							{#if sessions === null}
+								<p class="muted">loading…</p>
+							{:else if sessions.length === 0}
+								<p class="muted">no sessions</p>
+							{:else}
+								<table class="sessions">
+									<thead>
+										<tr>
+											<th>session</th>
+											<th>start</th>
+											<th>end</th>
+											<th class="num">duration</th>
+											<th class="num">msgs</th>
 										</tr>
-										{#each day.sessions as session (session.sessionId)}
-											<tr onclick={() => openSession(session.sessionId)}>
-												<td class="name">
-													<button class="link">{session.name}</button>
-												</td>
-												<td class="when">{timeOf(session.createdAt)}</td>
-												<td class="when">{endTime(session)}</td>
-												<td class="num duration">{sessionDuration(session.createdAt, session.updatedAt)}</td>
-												<td class="num">{session.messageCount}</td>
+									</thead>
+									<tbody>
+										{#each sessionDays as day (day.key)}
+											<tr class="day-row">
+												<td colspan="5">{day.label}</td>
 											</tr>
+											{#each day.sessions as session (session.sessionId)}
+												<tr onclick={() => openSession(session.sessionId)}>
+													<td class="name">
+														<button class="link">{session.name}</button>
+													</td>
+													<td class="when">{timeOf(session.createdAt)}</td>
+													<td class="when">{endTime(session)}</td>
+													<td class="num duration">{sessionDuration(session.createdAt, session.updatedAt)}</td>
+													<td class="num">{session.messageCount}</td>
+												</tr>
+											{/each}
 										{/each}
-									{/each}
-								</tbody>
-							</table>
+									</tbody>
+								</table>
+							{/if}
 						{/if}
 					{/if}
 				</div>
